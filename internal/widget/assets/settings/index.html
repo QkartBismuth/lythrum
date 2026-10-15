@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Настройки оболочки</title>
+<link rel="stylesheet" href="../common.css">
+<style>
+  html, body { overflow: hidden; }
+  .widget { padding: 0; gap: 0; }
+  #layout { flex: 1; min-height: 0; display: flex; }
+  #tabs { width: 172px; flex: none; padding: 14px 10px; display: flex; flex-direction: column; gap: 4px;
+    border-right: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.02); overflow: auto; }
+  #tabs button { text-align: left; background: transparent; border: 0; color: var(--muted); font: inherit;
+    font-size: 13px; padding: 7px 10px; border-radius: 8px; cursor: pointer; }
+  #tabs button:hover { background: rgba(255,255,255,.06); color: var(--fg); }
+  #tabs button.current { background: rgba(255,255,255,.1); color: var(--accent); }
+  #panel { flex: 1; min-width: 0; overflow: auto; padding: 18px 22px; }
+  h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  .field input[type="text"], .field input[type="number"], .field select {
+    background: rgba(255,255,255,.06); color: var(--fg); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 8px; padding: 6px 9px; font: inherit; font-size: 13px; }
+  .field input[type="color"] { width: 54px; height: 30px; padding: 0; border: 1px solid rgba(255,255,255,.14);
+    border-radius: 7px; background: transparent; }
+  .row { display: flex; align-items: center; gap: 9px; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  #footer { flex: none; display: flex; gap: 10px; align-items: center; padding: 11px 18px;
+    border-top: 1px solid rgba(255,255,255,.08); }
+  #status { flex: 1; font-size: 12.5px; color: var(--muted); }
+  .action { background: var(--accent); color: #06121a; border: 0; border-radius: 9px; padding: 7px 15px;
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .action.ghost { background: rgba(255,255,255,.08); color: var(--fg); font-weight: 400; }
+  #mediaList { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+  #mediaList button { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1); color: var(--fg);
+    border-radius: 8px; padding: 4px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+  .binds { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 7px; }
+  .bind { display: flex; justify-content: space-between; gap: 10px; align-items: center;
+    background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; }
+  .bind code { font-family: ui-monospace, monospace; color: var(--accent); }
+  button.ghost { background: rgba(255,255,255,.08); color: var(--fg); border: 1px solid rgba(255,255,255,.1);
+    border-radius: 8px; padding: 4px 9px; font: inherit; font-size: 12px; cursor: pointer; min-width: 30px; }
+  button.ghost:hover { background: rgba(255,255,255,.15); }
+  button.current { color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .card { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); border-radius: 10px;
+    padding: 12px 14px; }
+  .card .title { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<div class="widget">
+  <div id="layout">
+    <div id="tabs"></div>
+    <div id="panel"></div>
+  </div>
+  <div id="footer">
+    <span id="status">Загружаю настройки…</span>
+    <button class="action ghost" id="reload">Перечитать</button>
+    <button class="action" id="apply">Применить</button>
+  </div>
+</div>
+<script src="../common.js"></script>
+<script src="settings.js"></script>
+</body>
+</html>

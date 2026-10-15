@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Система</title>
+<link rel="stylesheet" href="../common.css">
+<style>
+  .rows { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
+  .row { display: flex; flex-direction: column; gap: 5px; }
+  .row .head { display: flex; justify-content: space-between; font-size: 12.5px; }
+  .row .head b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .cores { display: grid; grid-template-columns: repeat(auto-fit, minmax(26px, 1fr)); gap: 3px; height: 26px; align-items: end; }
+  .cores i { display: block; border-radius: 2px; background: var(--accent); opacity: .85; }
+  .foot { font-size: 11.5px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="widget">
+  <div class="title">Система</div>
+  <div class="rows">
+    <div class="row"><div class="head"><span>Процессор</span><b id="cpu">—</b></div><div class="bar"><span id="cpuBar"></span></div><div class="cores" id="cores"></div></div>
+    <div class="row"><div class="head"><span>Память</span><b id="mem">—</b></div><div class="bar"><span id="memBar"></span></div></div>
+    <div class="row" id="diskRow"><div class="head"><span id="diskName">Диск</span><b id="disk">—</b></div><div class="bar"><span id="diskBar"></span></div></div>
+    <div class="foot"><span id="load">нагрузка —</span><span id="net">сеть —</span><span id="temp">темп —</span><span id="up">в работе —</span></div>
+  </div>
+</div>
+<script src="../common.js"></script>
+<script src="sysmon.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Часы</title>
+<link rel="stylesheet" href="../common.css">
+<style>
+  .time { font-size: 54px; font-weight: 200; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+  .time .sec { font-size: 22px; color: var(--muted); }
+  .date { color: var(--muted); font-size: 14px; text-transform: capitalize; }
+  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; font-size: 12px; }
+  .cal .dow { color: var(--muted); text-align: center; font-size: 11px; }
+  .cal .day { text-align: center; padding: 3px 0; border-radius: 8px; font-variant-numeric: tabular-nums; }
+  .cal .day.other { color: rgba(234, 246, 255, .28); }
+  .cal .day.today { background: var(--accent); color: #06121a; font-weight: 600; }
+  .cal .day.event::after { content: ''; display: block; width: 4px; height: 4px; margin: 2px auto 0; border-radius: 50%; background: var(--accent); }
+  .events { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+  .events .item { display: flex; gap: 8px; }
+  .events .when { color: var(--accent); min-width: 42px; font-variant-numeric: tabular-nums; }
+  .rows { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+</style>
+</head>
+<body>
+<div class="widget">
+  <div class="title">Часы и календарь</div>
+  <div class="time"><span id="hm">--:--</span><span class="sec" id="ss">:--</span></div>
+  <div class="date" id="date">…</div>
+  <div class="cal" id="cal"></div>
+  <div class="events" id="events"></div>
+</div>
+<script src="../common.js"></script>
+<script src="clock.js"></script>
+</body>
+</html>

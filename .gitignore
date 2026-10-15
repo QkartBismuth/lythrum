@@ -1,0 +1,22 @@
+# Godot 4
+.godot/
+.import/
+export.cfg
+export_presets.cfg
+
+# Служебные файлы Bismuth_MCP_Godot
+.mcp/
+.mcp-backups/
+.mcp-shots/
+
+# Go
+/lythrum
+*.exe
+
+# Lythrum
+/lythrum
+*.test
+*.out
+xvfb*.log
+/.directory
+/xvfb-run.sh
