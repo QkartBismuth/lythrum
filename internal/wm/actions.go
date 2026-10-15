@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"lythrum/internal/desk"
 	"lythrum/internal/layout"
 )
 
@@ -56,8 +57,7 @@ func (w *WM) runAction(action, arg string) {
 		}
 	case "toggle_float":
 		if w.focused != nil {
-			w.focused.floating = !w.focused.floating
-			w.relayout()
+			w.focused.ToggleFloating()
 		}
 	case "layout":
 		w.setLayout(arg)
@@ -90,8 +90,9 @@ func (w *WM) runAction(action, arg string) {
 			w.start.OpenSelected()
 		}
 	case "desktop_scan":
-		w.start.scan()
-		w.log.Info("desktop rescanned", "entries", len(w.start.entries), "dir", w.start.dir)
+		w.rescanTiles()
+	case "desktop_icons":
+		w.desktop.Reload()
 	case "quit":
 		w.log.Info("quit requested")
 		if w.start.open {
@@ -125,6 +126,18 @@ func (w *WM) runAction(action, arg string) {
 		}
 		w.log.Warn("unknown action", "action", action)
 	}
+}
+
+// rescanTiles re-reads the desktop, the launchers and the home folders, then
+// lays the new tiles out. The walk runs in the background, so the tiles appear
+// as soon as it lands.
+func (w *WM) rescanTiles() {
+	if w.desk != nil {
+		w.desk.scan(true)
+		w.log.Info("desktop rescanned, waiting for the scan", "dir", desk.Dir())
+		return
+	}
+	w.refreshTiles()
 }
 
 // doSpawn launches a command detached from the window manager.
@@ -208,11 +221,14 @@ func (w *WM) Describe() string {
 		w.layoutKind(), w.config().Desktops, w.root.CurrentDesktop())
 	monitors := w.monitorsSnapshot()
 	fmt.Fprintf(&b, "session: %s\n", w.session)
+	off := w.canvas.Offset()
+	fmt.Fprintf(&b, "desktop canvas: origin at %d,%d on screen\n", off.X, off.Y)
 	fmt.Fprintf(&b, "monitors: %d\n", len(monitors))
 	for _, m := range monitors {
 		fmt.Fprintf(&b, "  %s %dx%d+%d+%d%s\n", m.Name, m.W, m.H, m.X, m.Y, primaryMark(m.Primary))
 	}
 	fmt.Fprintf(&b, "%s", w.start)
+	fmt.Fprintf(&b, "%s", w.desktop)
 	fmt.Fprintf(&b, "clients: %d\n", len(w.clients))
 	for i, c := range w.focusList() {
 		mark := " "

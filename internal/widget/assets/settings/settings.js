@@ -49,6 +49,10 @@
       hint: 'Размер, отступы и поведение плиток стартового экрана.',
       fields: [
         { key: 'grid_widgets', label: 'Показывать живые виджеты', type: 'check' },
+        { key: 'grid_apps', label: 'Показывать установленные приложения', type: 'check' },
+        { key: 'grid_home_files', label: 'Показывать файлы из домашних папок', type: 'check' },
+        { key: 'grid_file_limit', label: 'Больше всего файлов', type: 'number', min: 50, max: 4000 },
+        { key: 'desktop_icons', label: 'Иконки на рабочем столе', type: 'check' },
         { key: 'grid_large', label: 'Крупная плитка 2×2', type: 'check' },
         { key: 'grid_large_min', label: 'Крупная от', type: 'number', min: 1, max: 12 },
         { key: 'grid_min_cell', label: 'Минимальная плитка', type: 'number', min: 40, max: 400 },

@@ -417,13 +417,15 @@ func powerAvailable(id, hint string) (bool, string) {
 			}
 			return false, "ядро не умеет этот режим"
 		}
-	case "logout", "reboot", "poweroff":
+	case "reboot", "poweroff":
 		if !hasAnyCommand("systemctl", "loginctl") {
 			return false, "нет systemctl или loginctl"
 		}
-	}
-	if id == "logout" && os.Getenv("XDG_SESSION_ID") == "" && !hasAnyCommand("loginctl") {
-		return false, "нет loginctl"
+	case "logout":
+		// Logging out always works: the shell can at least leave, which ends
+		// a bare X session. Marking it unavailable would leave the user with
+		// no way out at all.
+		return true, hint
 	}
 	return true, hint
 }
@@ -464,15 +466,29 @@ func powerCommands(id string) [][]string {
 	case "poweroff":
 		return [][]string{{"systemctl", "poweroff"}, {"loginctl", "poweroff"}}
 	case "logout":
+		out := [][]string{}
 		if id := os.Getenv("XDG_SESSION_ID"); id != "" {
-			return [][]string{{"loginctl", "terminate-session", id}}
+			out = append(out, []string{"loginctl", "terminate-session", id})
 		}
+		// Without a logind session there is no session id to terminate, so
+		// the display manager and, as a last resort, every session of this
+		// user are tried.
+		out = append(out, []string{"dm-tool", "logout"})
+		if user := os.Getenv("USER"); user != "" {
+			out = append(out, []string{"loginctl", "terminate-user", user})
+		}
+		return out
 	}
 	return nil
 }
 
 // logout ends the session. It asks logind first and quits the shell when the
 // session is not managed, which is what a bare X session needs.
+//
+// Every step has to be verified: loginctl reports a failure on its standard
+// output and still exits with a code the shell cannot see when the process is
+// only started, so a silent no-op here means the user stays in the session
+// forever.
 func (w *WM) logout() error {
 	var lastErr error
 	for _, cmd := range powerCommands("logout") {
@@ -483,28 +499,29 @@ func (w *WM) logout() error {
 			lastErr = err
 			continue
 		}
-		if err := runCommandNoWait(cmd[0], cmd[1:]...); err == nil {
+		ctx, cancel := commandContext(logoutTimeout)
+		err := runCommand(ctx, cmd[0], cmd[1:]...)
+		cancel()
+		if err == nil {
+			w.log.Info("session terminated", "command", strings.Join(cmd, " "))
 			return nil
-		} else {
-			lastErr = err
 		}
-	}
-	if user := os.Getenv("USER"); user != "" {
-		if _, err := exec.LookPath("loginctl"); err == nil {
-			if err := runCommandNoWait("loginctl", "terminate-user", user); err == nil {
-				return nil
-			} else {
-				lastErr = err
-			}
-		}
+		lastErr = err
+		w.log.Warn("cannot terminate the session", "command", strings.Join(cmd, " "), "error", err)
 	}
 	if lastErr != nil {
 		w.log.Warn("cannot terminate the session through logind", "error", lastErr)
 	}
-	// Nothing else works, so the shell ends the session by leaving.
+	// Nothing else works, so the shell ends the session by leaving. This is
+	// the only step that always works, so the user is never stuck.
+	w.log.Info("ending the session by leaving the shell")
 	w.Quit()
 	return nil
 }
+
+// logoutTimeout bounds how long loginctl may take before the shell falls back
+// to leaving on its own.
+const logoutTimeout = 8 * time.Second
 
 // commandContext bounds how long a power command may take before the menu
 // reports it as failed.
@@ -525,21 +542,12 @@ func runCommand(ctx context.Context, name string, args ...string) error {
 	return fmt.Errorf("%s: %w", name, err)
 }
 
-// runCommandNoWait starts a command and does not wait for the system to go
-// down, which is what terminating a session needs.
-func runCommandNoWait(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	// The child must not keep the shell's pipes open, and it may outlive us.
-	go func() { _ = cmd.Wait() }()
-	return nil
-}
-
-// pixel converts a palette colour into the pixel value Xlib wants.
+// pixel converts a palette colour into the pixel value Xlib wants. The rest of
+// the shell goes through Display.PixelFromRGB, which packs the channels the way
+// a TrueColor visual expects; doing it by hand in a different order turns the
+// accent into a different colour.
 func (s *powerScreen) pixel(c color.RGBA) uint32 {
-	return uint32(c.R) | uint32(c.G)<<8 | uint32(c.B)<<16
+	return s.wm.d.PixelFromRGB(uint32(c.R), uint32(c.G), uint32(c.B))
 }
 
 func firstLine(text string) string {

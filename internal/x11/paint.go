@@ -6,6 +6,12 @@ package x11
 #include <string.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xproto.h>
+#include "xevent.h"
+
+// Defined in event.go: arms the shared error slot around a call that has to
+// report a protocol error of its own.
+extern void ly_collect_errors(ly_event *slot, int armed);
 
 static GC ly_create_gc(Display *dpy, Drawable d) {
 	return XCreateGC(dpy, d, 0, NULL);
@@ -56,19 +62,18 @@ static int ly_get_image(Display *dpy, Drawable src, int x, int y, int w, int h,
 	return 1;
 }
 
-// ly_capture_error is installed around the upload so the reason a server
-// refuses an image can be reported back to Go.
-static int ly_last_error = 0;
-
-static int ly_capture_error(Display *dpy, XErrorEvent *e) {
-	ly_last_error = e->error_code;
-	return 0;
-}
-
+// ly_put_rgba uploads one BGRX image. XPutImage reports success even when the
+// server refuses the request, so the protocol error is the only usable signal.
+//
+// The error is read from the shared slot instead of a handler of its own: a
+// window manager sees protocol errors from every client on the display, and a
+// permanent handler here would blame the next upload for whatever some other
+// client did a moment earlier.
 static int ly_put_rgba(Display *dpy, Drawable dst, GC gc, unsigned char *src,
                        int w, int h, int dx, int dy) {
 	size_t bytes = (size_t)w * h * 4;
 	unsigned char *buf = (unsigned char *)malloc(bytes);
+	ly_event slot;
 	XImage *img;
 	int rc;
 
@@ -82,17 +87,20 @@ static int ly_put_rgba(Display *dpy, Drawable dst, GC gc, unsigned char *src,
 		free(buf);
 		return -2;
 	}
-	// XPutImage reports 0 even when the pixels arrive on some Xlib builds, so
-	// the X protocol error is the only reliable failure signal. The slot has to
-	// be cleared first: an error from an earlier request would otherwise make
-	// every later upload look like a failure.
-	XSetErrorHandler(ly_capture_error);
-	ly_last_error = 0;
+	memset(&slot, 0, sizeof(slot));
+	ly_collect_errors(&slot, 1);
 	rc = XPutImage(dpy, dst, gc, img, 0, 0, dx, dy, (unsigned int)w, (unsigned int)h);
+	// The round trip makes the server answer before the slot is read.
 	XSync(dpy, False);
+	ly_collect_errors(0, 0);
 	XDestroyImage(img);
 	(void)rc;
-	return ly_last_error ? -ly_last_error : 0;
+	// An error left over from a request that was already in flight belongs to
+	// the caller before this upload, not to it. The slot carries the code
+	// negated, which is the sign the Go side expects.
+	if (slot.request != X_PutImage)
+		return 0;
+	return slot.type;
 }
 */
 import "C"

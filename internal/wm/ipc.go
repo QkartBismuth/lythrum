@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -296,7 +297,7 @@ func (w *WM) execute(cmd Command) Reply {
 			case "open":
 				w.start.OpenSelected()
 			case "scan":
-				w.start.scan()
+				w.rescanTiles()
 			case "page":
 				w.start.Page(1)
 			default:
@@ -308,6 +309,19 @@ func (w *WM) execute(cmd Command) Reply {
 		return Reply{OK: true, Result: mustJSON(w.start.Status())}
 	case "desktop_entries":
 		return Reply{OK: true, Result: mustJSON(desktopSnapshot(w.start))}
+	case "canvas":
+		return w.canvasCommand(cmd.Args)
+	case "toggle_float":
+		if w.focused != nil {
+			w.focused.ToggleFloating()
+		}
+		return Reply{OK: true}
+	case "desktop_scan":
+		w.rescanTiles()
+		return Reply{OK: true}
+	case "desktop_icons":
+		w.desktop.Reload()
+		return Reply{OK: true, Result: mustJSON(w.desktop.Status())}
 	case "start_screen_paint":
 		w.start.repaint()
 		return Reply{OK: true}
@@ -366,7 +380,40 @@ func (w *WM) keybindList() []KeybindInfo {
 	return out
 }
 
+// canvasCommand moves the desktop. Without arguments it puts the view back at
+// the origin, with two numbers it shows a point of the desktop, and with one
+// number it slides that far.
+func (w *WM) canvasCommand(args []string) Reply {
+	switch len(args) {
+	case 0:
+		off := w.canvas.Offset()
+		w.panCanvas(-off.X, -off.Y)
+	case 1:
+		dx, err := strconv.Atoi(args[0])
+		if err != nil {
+			return Reply{OK: false, Error: "the shift must be a number"}
+		}
+		w.panCanvas(dx, 0)
+	case 2:
+		x, errX := strconv.Atoi(args[0])
+		y, errY := strconv.Atoi(args[1])
+		if errX != nil || errY != nil {
+			return Reply{OK: false, Error: "the point must be two numbers"}
+		}
+		off := w.canvas.Offset()
+		w.canvas.PanTo(x-off.X, y-off.Y)
+		w.desktopPainted()
+	default:
+		return Reply{OK: false, Error: "canvas takes a shift or a point"}
+	}
+	off := w.canvas.Offset()
+	return Reply{OK: true, Result: mustJSON(map[string]int{"x": off.X, "y": off.Y})}
+}
+
 func (w *WM) winInfo(c *Client) ClientInfo {
+	// The position is reported on the screen: it is what a tool asking about a
+	// window expects, and the canvas place of the window follows from it.
+	root := w.canvas.ToRootRect(c.geom)
 	return ClientInfo{
 		ID:       uint32(c.id),
 		Title:    c.String(),
@@ -374,7 +421,7 @@ func (w *WM) winInfo(c *Client) ClientInfo {
 		Focused:  c == w.focused,
 		Floating: c.floating,
 		Desktop:  c.desktop,
-		X:        c.geom.X, Y: c.geom.Y, W: c.geom.W, H: c.geom.H,
+		X:        root.X, Y: root.Y, W: root.W, H: root.H,
 	}
 }
 

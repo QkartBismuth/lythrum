@@ -46,6 +46,9 @@ type Entry struct {
 	// Widget names the live tile program of a launcher, taken from
 	// X-Lythrum-Widget. An empty value means the tile is drawn from the icon.
 	Widget string
+	// NoDisplay marks a launcher that asked to stay out of menus, such as the
+	// helpers some applications install for themselves.
+	NoDisplay bool
 }
 
 // Dir returns the user's desktop directory. It follows XDG_DESKTOP_DIR from
@@ -241,6 +244,8 @@ func ParseLauncher(body string) (Entry, error) {
 			entry.Categories = value
 		case "X-Lythrum-Widget":
 			entry.Widget = value
+		case "NoDisplay":
+			entry.NoDisplay = strings.EqualFold(value, "true")
 		case "Type":
 			if value == "Link" {
 				entry.Kind = KindShortcut
@@ -458,10 +463,17 @@ func Applications() []Entry {
 
 // SearchDirs are the folders the shell looks through when the user searches
 // for a file.
-func SearchDirs() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return []string{"."}
+func SearchDirs() []string { return SearchDirsFrom("") }
+
+// SearchDirsFrom returns the search folders of an explicit home directory,
+// which keeps the walk testable.
+func SearchDirsFrom(home string) []string {
+	if home == "" {
+		dir, err := os.UserHomeDir()
+		if err != nil {
+			return []string{"."}
+		}
+		home = dir
 	}
 	return []string{
 		filepath.Join(home, "Desktop"),
@@ -472,12 +484,15 @@ func SearchDirs() []string {
 
 // SearchFiles lists files from the search folders, up to limit entries so a
 // large home directory cannot stall the shell.
-func SearchFiles(limit int) []Entry {
+func SearchFiles(limit int) []Entry { return SearchFilesFrom("", limit) }
+
+// SearchFilesFrom is SearchFiles with an explicit home directory.
+func SearchFilesFrom(home string, limit int) []Entry {
 	if limit <= 0 {
 		limit = 800
 	}
 	var out []Entry
-	for _, dir := range SearchDirs() {
+	for _, dir := range SearchDirsFrom(home) {
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
@@ -485,10 +500,15 @@ func SearchFiles(limit int) []Entry {
 			if len(out) >= limit {
 				return fs.SkipAll
 			}
-			if d.IsDir() {
-				if strings.HasPrefix(d.Name(), ".") && path != dir {
+			// A leading dot hides a file from the desktop as well, and
+			// .directory is not something anyone wants as a tile.
+			if strings.HasPrefix(d.Name(), ".") {
+				if d.IsDir() && path != dir {
 					return fs.SkipDir
 				}
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			out = append(out, Entry{Name: d.Name(), Path: path, Kind: KindFile})

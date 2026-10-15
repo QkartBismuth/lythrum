@@ -152,6 +152,53 @@ func (s *searchScreen) refresh() {
 	}
 }
 
+// layoutBar returns the query bar and the result rows in window coordinates,
+// so painting and hit testing cannot disagree about where things are.
+func (s *searchScreen) layoutBar() (bar layout.Rect, rows []layout.Rect) {
+	font := s.wm.font()
+	barW := s.area.W - 2*maxInt(s.area.W/12, 40)
+	barH := maxInt(s.area.H/12, 64)
+	bar = layout.Rect{
+		X: maxInt(s.area.W/12, 40),
+		Y: maxInt(s.area.H/8, 60),
+		W: barW,
+		H: barH,
+	}
+	rowH := searchRowHeight(font)
+	rows = make([]layout.Rect, 0, searchMaxResults)
+	for i := range s.results {
+		y := bar.Bottom() + 10 + i*rowH
+		if y+rowH > s.area.H-20 {
+			break
+		}
+		rows = append(rows, layout.Rect{X: bar.X, Y: y, W: bar.W, H: rowH - 4})
+	}
+	return bar, rows
+}
+
+// searchRowHeight is the height of one result row.
+func searchRowHeight(font *x11.Font) int {
+	return maxInt(font.LineHeight()+14, 30)
+}
+
+// HandleButton runs the result the pointer landed on, and closes the bar when
+// the click missed everything.
+func (s *searchScreen) HandleButton(rootX, rootY int) {
+	if s.win == 0 {
+		return
+	}
+	x, y := rootX-s.area.X, rootY-s.area.Y
+	_, rows := s.layoutBar()
+	for i, r := range rows {
+		if r.Contains(x, y) {
+			s.cursor = i
+			s.activate()
+			return
+		}
+	}
+	s.Close()
+}
+
 func (s *searchScreen) repaint() {
 	if s.win == 0 || !s.gc.Valid() {
 		return
@@ -161,11 +208,8 @@ func (s *searchScreen) repaint() {
 	d.SetForegroundOf(s.gc, 0x000d1117)
 	d.FillRectangle(s.win, s.gc, 0, 0, s.area.W, s.area.H)
 
-	margin := maxInt(s.area.W/12, 40)
-	barW := s.area.W - 2*margin
-	barH := maxInt(s.area.H/12, 64)
-	barX := margin
-	barY := s.area.Y - s.area.Y + maxInt(s.area.H/8, 60)
+	bar, rows := s.layoutBar()
+	barX, barY, barW, barH := bar.X, bar.Y, bar.W, bar.H
 
 	d.SetForegroundOf(s.gc, 0x00181d26)
 	d.FillRectangle(s.win, s.gc, barX, barY, barW, barH)
@@ -191,24 +235,22 @@ func (s *searchScreen) repaint() {
 	d.SetForegroundOf(s.gc, 0x006ee7ff)
 	d.FillRectangle(s.win, s.gc, caretX, barY+barH/2-font.Height()/3, 2, font.Height())
 
-	rowH := maxInt(font.LineHeight()+14, 30)
 	for i, result := range s.results {
-		y := barY + barH + 10 + i*rowH
-		if y+rowH > s.area.H-20 {
+		if i >= len(rows) {
 			break
 		}
+		y := rows[i].Y
 		if i == s.cursor {
 			d.SetForegroundOf(s.gc, 0x00222b38)
-			d.FillRectangle(s.win, s.gc, barX, y, barW, rowH-4)
+			d.FillRectangle(s.win, s.gc, barX, y, barW, rows[i].H)
 		}
 		s.text.SetColor(d, colors.Text)
-		s.text.DrawText(d, barX+24, y+rowH/2+font.Height()/3, font.Truncate(result.Name, barW-260))
+		s.text.DrawText(d, barX+24, y+rows[i].H/2+font.Height()/3, font.Truncate(result.Name, barW-260))
+		s.text.SetColor(d, colors.TextDim)
 		if result.Item.Kind == "application" {
-			s.text.SetColor(d, colors.TextDim)
-			s.text.DrawText(d, barX+barW-220, y+rowH/2+font.Height()/3, "приложение")
+			s.text.DrawText(d, barX+barW-220, y+rows[i].H/2+font.Height()/3, "приложение")
 		} else {
-			s.text.SetColor(d, colors.TextDim)
-			s.text.DrawText(d, barX+barW-220, y+rowH/2+font.Height()/3,
+			s.text.DrawText(d, barX+barW-220, y+rows[i].H/2+font.Height()/3,
 				font.Truncate(dirOf(result.Path), 200))
 		}
 	}

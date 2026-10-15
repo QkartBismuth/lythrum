@@ -557,4 +557,4 @@ func shellInfo(s Session, _ json.RawMessage) (any, error) {
 }
 
 // Version is the shell version reported to widgets.
-const Version = "0.3"
+const Version = "0.4"

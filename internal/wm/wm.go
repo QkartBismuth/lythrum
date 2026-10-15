@@ -84,7 +84,10 @@ type WM struct {
 
 	monitors   []layout.Monitor
 	layout     layout.StackKind
+	canvas     *canvas
 	start      *startScreen
+	desktop    *desktopLayer
+	desk       *deskCache
 	started    time.Time
 	quit       chan struct{}
 	quitOnce   sync.Once
@@ -230,6 +233,11 @@ func (w *WM) applyConfig() {
 	if w.paper != nil {
 		w.paper.Reload()
 	}
+	if w.desktop != nil {
+		// The icons restack onto the wallpaper, which may have just been
+		// replaced.
+		w.desktop.Reload()
+	}
 	// Frame sizes, the tiling layout and the number of desktops change what is
 	// on screen, so the shell has to lay the windows out again.
 	w.setLayoutKind(w.cfg.LayoutKind())
@@ -303,12 +311,20 @@ func New(d *x11.Display, cfg config.Config, log *slog.Logger) (*WM, error) {
 		started:       time.Now(),
 	}
 	w.root = x11.NewEWMHRoot(d)
+	// The canvas has to exist before the windows already on the display are
+	// adopted: they are placed in its coordinates.
+	w.canvas = newCanvas(w)
 	if err := w.setup(); err != nil {
 		return nil, err
 	}
 	w.start = w.newStartScreen()
 	w.search = newSearchScreen(w)
 	w.power = newPowerScreen(w)
+	w.desk = newDeskCache(w)
+	w.desk.scan(true)
+	// The desktop surface paints the wallpaper and the icons into one window,
+	// so it has to exist before the wallpaper player hands it its first frame.
+	w.desktop = newDesktopLayer(w)
 	w.paper = newWallpapers(w)
 	w.mediaJobs = make(chan func(), 128)
 	go w.startMediaWorker()

@@ -15,12 +15,72 @@ typedef struct {
 	int map_state;
 } ly_geom;
 
+// ly_create_window fills an XSetWindowAttributes by name and hands it to
+// XCreateWindow.
+//
+// The attribute list cannot be a plain array of longs: Xlib reads the fields of
+// the struct by name, gated by the mask, so an array is interpreted as
+// background_pixmap, background_pixel, border_pixmap, ... Reading it that way
+// put the event mask where the cursor belongs, which left every window the
+// shell owns without events and asked the server for a cursor from thin air.
+typedef struct {
+	unsigned long back_pixel;
+	unsigned long border_pixel;
+	int bit_gravity;
+	int win_gravity;
+	int backing_store;
+	unsigned long backing_planes;
+	unsigned long backing_pixel;
+	int override_redirect;
+	int save_under;
+	unsigned long event_mask;
+	int do_not_propagate;
+	unsigned long colormap;
+	unsigned long cursor;
+	// has_back is false when the caller wants an unpainted background, which
+	// is what makes a window transparent.
+	int has_back;
+} ly_window_attrs;
+
 static Window ly_create_window(Display *dpy, Window parent, int x, int y,
                                unsigned int w, unsigned int h, unsigned int border,
-                               unsigned int depth, Visual *visual, unsigned long valuemask,
-                               void *attrs) {
+                               unsigned int depth, Visual *visual,
+                               ly_window_attrs *want) {
+	XSetWindowAttributes attrs;
+	unsigned long mask = 0;
+
+	memset(&attrs, 0, sizeof(attrs));
+	if (want->has_back) {
+		attrs.background_pixel = want->back_pixel;
+		mask |= CWBackPixel;
+	}
+	attrs.border_pixel = want->border_pixel;
+	mask |= CWBorderPixel;
+	attrs.bit_gravity = want->bit_gravity;
+	mask |= CWBitGravity;
+	attrs.win_gravity = want->win_gravity;
+	mask |= CWWinGravity;
+	attrs.backing_store = want->backing_store;
+	mask |= CWBackingStore;
+	attrs.backing_planes = want->backing_planes;
+	mask |= CWBackingPlanes;
+	attrs.backing_pixel = want->backing_pixel;
+	mask |= CWBackingPixel;
+	attrs.override_redirect = want->override_redirect;
+	mask |= CWOverrideRedirect;
+	attrs.save_under = want->save_under;
+	mask |= CWSaveUnder;
+	attrs.event_mask = (long)want->event_mask;
+	mask |= CWEventMask;
+	attrs.do_not_propagate_mask = want->do_not_propagate;
+	mask |= CWDontPropagate;
+	attrs.colormap = (Colormap)want->colormap;
+	mask |= CWColormap;
+	attrs.cursor = (Cursor)want->cursor;
+	mask |= CWCursor;
+
 	return XCreateWindow(dpy, parent, x, y, w, h, border, depth,
-		InputOutput, visual, valuemask, attrs);
+		InputOutput, visual, mask, &attrs);
 }
 
 static ly_geom *ly_get_geometry(Display *dpy, Window w) {
@@ -208,13 +268,16 @@ func (d *Display) Attributes(w Window) (*WindowAttributes, error) {
 
 // CreateWindowParams describes a window to create.
 type CreateWindowParams struct {
-	Parent           Window
-	X, Y             int
-	Width, Height    uint
-	BorderWidth      uint
-	Class            uint
-	Depth            uint
-	BackPixel        uint32
+	Parent        Window
+	X, Y          int
+	Width, Height uint
+	BorderWidth   uint
+	Class         uint
+	Depth         uint
+	BackPixel     uint32
+	// BackNone leaves the background unpainted, so whatever sits below the
+	// window stays visible. The desktop icon layer needs it.
+	BackNone         bool
 	BorderPixel      uint32
 	BitGravity       uint
 	WinGravity       uint
@@ -241,53 +304,37 @@ func (d *Display) CreateWindow(p CreateWindowParams) (Window, error) {
 		p.Depth = uint(d.Depth())
 	}
 	if p.BackingStore == 0 {
-		p.BackingStore = 1 // NotUseful
+		p.BackingStore = backingNotUseful
 	}
-
-	mask := uint(C.CWBackPixel) | uint(C.CWBorderPixel) | uint(C.CWBitGravity) |
-		uint(C.CWWinGravity) | uint(C.CWBackingStore) | uint(C.CWBackingPlanes) |
-		uint(C.CWBackingPixel) | uint(C.CWOverrideRedirect) | uint(C.CWSaveUnder) |
-		uint(C.CWEventMask) | uint(C.CWDontPropagate) | uint(C.CWColormap) |
-		uint(C.CWCursor)
-
-	var attrs [14]C.ulong
-	idx := 0
-	attrs[idx] = C.ulong(p.BackPixel)
-	idx++
-	attrs[idx] = C.ulong(p.BorderPixel)
-	idx++
-	attrs[idx] = C.ulong(p.BitGravity)
-	idx++
-	attrs[idx] = C.ulong(p.WinGravity)
-	idx++
-	attrs[idx] = C.ulong(p.BackingStore)
-	idx++
-	attrs[idx] = C.ulong(p.BackingPlanes)
-	idx++
-	attrs[idx] = C.ulong(p.BackingPixel)
-	idx++
-	attrs[idx] = C.ulong(toCBool(p.OverrideRedirect))
-	idx++
-	attrs[idx] = C.ulong(toCBool(p.SaveUnder))
-	idx++
-	attrs[idx] = C.ulong(p.EventMask)
-	idx++
-	attrs[idx] = C.ulong(toCBool(p.DontPropagate))
-	idx++
-	attrs[idx] = C.ulong(p.Colormap)
-	idx++
-	attrs[idx] = C.ulong(p.Cursor)
-	idx++
-
+	attrs := C.ly_window_attrs{
+		back_pixel:        C.ulong(p.BackPixel),
+		has_back:          toCBool(!p.BackNone),
+		border_pixel:      C.ulong(p.BorderPixel),
+		bit_gravity:       C.int(p.BitGravity),
+		win_gravity:       C.int(p.WinGravity),
+		backing_store:     C.int(p.BackingStore),
+		backing_planes:    C.ulong(p.BackingPlanes),
+		backing_pixel:     C.ulong(p.BackingPixel),
+		override_redirect: toCBool(p.OverrideRedirect),
+		save_under:        toCBool(p.SaveUnder),
+		event_mask:        C.ulong(p.EventMask),
+		do_not_propagate:  toCBool(p.DontPropagate),
+		colormap:          C.ulong(p.Colormap),
+		cursor:            C.ulong(p.Cursor),
+	}
 	w := C.ly_create_window(d.dpy, C.Window(p.Parent),
 		C.int(p.X), C.int(p.Y), C.uint(p.Width), C.uint(p.Height), C.uint(p.BorderWidth),
-		C.uint(p.Depth), d.visual, C.ulong(mask), unsafe.Pointer(&attrs[0]))
+		C.uint(p.Depth), d.visual, &attrs)
 	if w == 0 {
 		return 0, ErrBadWindow
 	}
 	d.Flush()
 	return Window(w), nil
 }
+
+// backingNotUseful keeps the server from saving obscured areas: the shell paints
+// every frame of the wallpaper and the widgets itself.
+const backingNotUseful = 1
 
 // MapWindow maps a window.
 func (d *Display) MapWindow(w Window) {

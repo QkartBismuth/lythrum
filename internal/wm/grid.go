@@ -33,6 +33,9 @@ type startScreen struct {
 	opened             time.Time
 	lastClick          time.Time
 	lastIndex          int
+	// dragX/dragY hold where a press landed, so dragging can page the grid.
+	dragX, dragY        int
+	dragging, dragMoved bool
 
 	font     *x11.Font
 	colors   gridColors
@@ -172,22 +175,40 @@ func (s *startScreen) Toggle() error {
 	return s.Open()
 }
 
-// scan re-reads the desktop directory.
+// scan re-reads the tile list. The walk of the system directories and of the
+// home folders happens in the background, so this only takes what the cache
+// already has and lays it out again.
 func (s *startScreen) scan() {
 	s.dir = desk.Dir()
-	entries, err := desk.Entries(s.dir)
-	if err != nil {
-		s.scanErr = err
-		s.wm.log.Warn("cannot read the desktop directory", "dir", s.dir, "error", err)
-		entries = nil
+	if s.wm != nil && s.wm.desk != nil {
+		s.wm.desk.scan(false)
+		s.scanErr = s.wm.desk.scanErr()
 	} else {
-		s.scanErr = nil
+		entries, err := desk.Entries(s.dir)
+		s.scanErr = err
+		if err != nil {
+			s.wm.log.Warn("cannot read the desktop directory", "dir", s.dir, "error", err)
+		}
+		s.setEntries(entries)
+		return
 	}
+	s.setEntries(s.wm.deskEntries())
+}
+
+// setEntries buckets the tiles into bands and lays them out.
+func (s *startScreen) setEntries(entries []desk.Entry) {
 	entries = s.addWidgetEntries(entries)
 	s.groups, s.entries = desk.Grouped(entries, s.wm.cfg.GridGroups)
 	s.hasItems = len(entries) > 0
+	if s.selection >= len(s.entries) {
+		s.selection = maxInt(len(s.entries)-1, 0)
+	}
+	s.layout()
+	if s.open {
+		s.repaint()
+	}
 	if s.scanErr == nil && len(s.entries) == 0 {
-		s.wm.log.Info("no desktop entries", "dir", s.dir)
+		s.wm.log.Info("no tiles to show", "dir", s.dir)
 	}
 }
 
@@ -650,8 +671,9 @@ func previewWorthy(entry desk.Entry) bool {
 	return entry.Path != ""
 }
 
-// glyph draws the placeholder tile icon: a rounded block with the first
-// letter of the name, coloured by kind.
+// glyph draws the placeholder tile icon: a rounded block coloured by kind. A
+// live tile carries its accent colour in the Icon field, which is what a widget
+// tile shows while its page is still loading.
 func (s *startScreen) glyph(entry desk.Entry, size int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 	colour := s.colors.GlyphFile
@@ -662,6 +684,11 @@ func (s *startScreen) glyph(entry desk.Entry, size int) *image.RGBA {
 		colour = s.colors.GlyphDir
 	case desk.KindShortcut:
 		colour = s.colors.GlyphLink
+	}
+	if entry.Kind == desk.KindLive {
+		if accent, ok := accentOf(entry.Icon); ok {
+			colour = accent
+		}
 	}
 
 	// A rounded square with a soft top-light edge.
@@ -917,9 +944,59 @@ func (s *startScreen) jumpToLetter(letter string) {
 	}
 }
 
+// dragThreshold is how far the pointer has to travel before a press turns into
+// a page change instead of a tile selection.
+const dragThreshold = 60
+
+// BeginDrag remembers where a press landed, so that dragging the grid can turn
+// the press into a page change.
+func (s *startScreen) BeginDrag(rootX, rootY int) {
+	s.dragX, s.dragY = rootX, rootY
+	s.dragging, s.dragMoved = s.open, false
+}
+
+// DragTo pages the grid once the pointer has travelled far enough. Without it
+// the tiles are the only way to reach the second page, which is what makes the
+// grid feel stuck in place.
+func (s *startScreen) DragTo(rootX, rootY int) {
+	if !s.dragging || s.dragMoved {
+		return
+	}
+	dx, dy := rootX-s.dragX, rootY-s.dragY
+	if abs(dx) < dragThreshold && abs(dy) < dragThreshold {
+		return
+	}
+	s.dragMoved = true
+	// Dragging up, or to the left, brings the next page, the way the original
+	// start screen behaved.
+	if abs(dy) >= abs(dx) {
+		s.pageStep(dy < 0)
+		return
+	}
+	s.pageStep(dx < 0)
+}
+
+// pageStep moves to the next page, or to the previous one.
+func (s *startScreen) pageStep(forward bool) {
+	if forward {
+		s.Page(1)
+		return
+	}
+	s.Page(-1)
+}
+
+// EndDrag forgets an unfinished drag.
+func (s *startScreen) EndDrag() { s.dragging, s.dragMoved = false, false }
+
 // HandleButton handles a press on a tile: the first press selects, a second
 // one launches.
 func (s *startScreen) HandleButton(e x11.ButtonPress, rootX, rootY int) {
+	// A press that turned into a drag has already paged the grid, so it must
+	// not select anything.
+	if s.dragMoved {
+		s.EndDrag()
+		return
+	}
 	entry, index, ok := s.EntryAt(rootX, rootY)
 	if !ok {
 		s.Close()
@@ -1030,4 +1107,13 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// accentOf reads a "#rrggbb" colour a live tile carries in place of an icon.
+func accentOf(spec string) (color.RGBA, bool) {
+	r, g, b, err := x11.HexColor(spec)
+	if err != nil {
+		return color.RGBA{}, false
+	}
+	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 0xff}, true
 }

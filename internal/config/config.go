@@ -63,6 +63,15 @@ type Config struct {
 	WallpaperDim     float64 `json:"wallpaper_dim"`
 	// GridWidgets shows the built-in live tiles in the start screen.
 	GridWidgets bool `json:"grid_widgets"`
+	// GridApps adds the installed launchers to the start screen, and
+	// GridHomeFiles the files of the home folders. Without them the bands of
+	// applications, games and documents stay empty on a fresh session.
+	GridApps      bool `json:"grid_apps"`
+	GridHomeFiles bool `json:"grid_home_files"`
+	// GridFileLimit caps how many home files the start screen collects.
+	GridFileLimit int `json:"grid_file_limit"`
+	// DesktopIcons draws the icons of the desktop directory over the wallpaper.
+	DesktopIcons bool `json:"desktop_icons"`
 	// GridGroups lists the bands and their order, by key.
 	GridGroups     []string `json:"grid_groups"`
 	GridBackground string   `json:"grid_background"`
@@ -103,12 +112,16 @@ func Default() Config {
 		GridLiveLimit:    6,
 		GridLiveFPS:      12,
 		GridWidgets:      true,
+		GridApps:         true,
+		GridHomeFiles:    true,
+		GridFileLimit:    400,
+		DesktopIcons:     true,
 		WallpaperEnabled: true,
 		WallpaperFPS:     12,
 		WallpaperDim:     0,
 		GridBorder:       24,
 		GridAspect:       1.0,
-		GridMaxCell:      180,
+		GridMaxCell:      132,
 		GridMinCell:      72,
 		GridLarge:        true,
 		GridLargeMin:     3,

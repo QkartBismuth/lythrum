@@ -5,6 +5,7 @@ import (
 	"os"
 	"syscall"
 
+	"lythrum/internal/layout"
 	"lythrum/internal/x11"
 )
 
@@ -40,4 +41,20 @@ func killProcess(pid int, sig syscall.Signal) error {
 		return err
 	}
 	return p.Signal(sig)
+}
+
+// abs is the distance from zero.
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// rootPoint turns a coordinate inside one of the shell's own windows into a
+// root coordinate. Adding the window origin is the whole job: mixing a root
+// coordinate into the same arithmetic lands the click in a different row, which
+// is how a power menu row became impossible to press.
+func rootPoint(area layout.Rect, x, y int) (int, int) {
+	return x + area.X, y + area.Y
 }

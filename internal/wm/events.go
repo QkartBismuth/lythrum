@@ -39,12 +39,18 @@ func (w *WM) Run(ctx context.Context) error {
 		case errors.Is(err, x11.ErrTimeout):
 			w.drainCommands()
 			w.applyPendingConfig()
+			if w.desk != nil && w.desk.poll() {
+				w.refreshTiles()
+			}
 			if w.queue != nil && w.queue.Poll() {
 				// A preview landed, so the tiles that asked for it have to be
 				// drawn again.
 				if w.start != nil && w.start.open {
 					w.start.repaint()
 					continue
+				}
+				if w.desktop != nil {
+					w.desktop.repaint()
 				}
 			}
 			w.paintWidgetSessions()
@@ -62,11 +68,17 @@ func (w *WM) Run(ctx context.Context) error {
 		w.handle(ev)
 		w.drainCommands()
 		w.applyPendingConfig()
+		if w.desk != nil && w.desk.poll() {
+			w.refreshTiles()
+		}
 	}
 }
 
 // shutdown gives the session back to whoever wants it next.
 func (w *WM) shutdown() {
+	if w.desktop != nil {
+		w.desktop.Shutdown()
+	}
 	w.paper.Shutdown()
 	for _, b := range w.grabs {
 		w.d.UngrabKey(b, w.d.Root())
@@ -102,6 +114,8 @@ func (w *WM) handle(ev x11.Event) {
 		w.onKeyPress(e)
 	case x11.ButtonPress:
 		w.onButtonPress(e)
+	case x11.ButtonRelease:
+		w.onButtonRelease(e)
 	case x11.MotionNotify:
 		w.onMotion(e)
 	case x11.EnterNotify:
@@ -120,6 +134,12 @@ func (w *WM) handle(ev x11.Event) {
 				// Rebuild the overlays against the new monitor layout.
 				w.start.Close()
 				_ = w.start.Open()
+			}
+			if w.desktop != nil {
+				// The icons are placed per monitor, so the layer has to be
+				// rebuilt against the new layout as well.
+				w.desktop.build()
+				w.desktop.scan()
 			}
 		}
 	case x11.Expose:
@@ -159,6 +179,12 @@ func (w *WM) onMapRequest(e x11.MapRequest) {
 	}
 	if w.isRenderHelper(e.Window) {
 		// The web renderer paints into this window off screen.
+		w.d.MapWindow(e.Window)
+		return
+	}
+	if _, managed := w.byID[e.Window]; managed {
+		// A managed client asks to be mapped again, for instance after it was
+		// iconified or after the manager reparented it into its frame.
 		w.d.MapWindow(e.Window)
 		return
 	}
@@ -300,6 +326,9 @@ func (w *WM) moveResize(e x11.ClientMessage) {
 	x, y := int(int16(uint16(e.Data[0]))), int(int16(uint16(e.Data[1])))
 	width, height := int(uint16(e.Data[2])), int(uint16(uint16(e.Data[0]>>16)))
 
+	// The message carries screen coordinates; the shell keeps the window in
+	// canvas coordinates.
+	x, y = w.canvas.ToCanvas(x, y)
 	g := c.geom
 	switch {
 	case flags&(1<<8) != 0 && flags&(1<<9) != 0: // x and y
@@ -318,7 +347,7 @@ func (w *WM) moveResize(e x11.ClientMessage) {
 		}
 	}
 	c.floating = true
-	w.applyGeometry(c, g)
+	w.applyGeometry(c, g, false)
 }
 
 func (w *WM) onKeyPress(e x11.KeyPress) {
@@ -378,42 +407,151 @@ func (w *WM) forwardKey(e x11.KeyPress, c *Client) {
 }
 
 func (w *WM) onButtonPress(e x11.ButtonPress) {
-	if e.Button != 1 {
+	if session := w.activeSession(); session != nil {
+		if e.Button == 1 {
+			session.Click(int(e.RootX), int(e.RootY))
+		}
 		return
 	}
-	if session := w.activeSession(); session != nil {
-		session.Click(int(e.RootX), int(e.RootY))
+	switch e.Button {
+	case 4, 5, 6, 7:
+		// The wheel turns the pages of the tile grid when it is open, and
+		// slides the desktop when the grid is not.
+		w.onScroll(e)
+		return
+	case 2:
+		// The middle button pans from anywhere, which is the quickest way to
+		// walk to a window standing at the far end of the desktop.
+		w.beginPan(int(e.RootX), int(e.RootY))
+		return
+	case 1:
+	default:
 		return
 	}
 	rootX, rootY := int(e.RootX), int(e.RootY)
 	if w.power != nil && w.power.Visible() {
-		if lx, ly, _, err := w.d.TranslateCoordinates(e.Window, e.Window,
+		// The menu grabs the pointer, so the event carries coordinates inside
+		// the menu window and they have to be turned back into root ones.
+		if lx, ly, _, err := w.d.TranslateCoordinates(w.power.win, w.power.win,
 			int(e.EventX), int(e.EventY)); err == nil {
-			rootX, rootY = lx, rootY+ly-w.power.area.Y
+			rootX, rootY = rootPoint(w.power.area, lx, ly)
 		}
 		w.power.HandleButton(rootX, rootY)
+		return
+	}
+	if w.search != nil && w.search.Visible() {
+		if lx, ly, _, err := w.d.TranslateCoordinates(w.search.win, w.search.win,
+			int(e.EventX), int(e.EventY)); err == nil {
+			rootX, rootY = rootPoint(w.search.area, lx, ly)
+		}
+		w.search.HandleButton(rootX, rootY)
 		return
 	}
 	if o := w.overlayFor(e.Window); o != nil {
 		// The pointer is grabbed to the overlay, so the root coordinates
 		// need converting into the overlay's own space.
 		if lx, ly, _, err := w.d.TranslateCoordinates(o.win, o.win, int(e.EventX), int(e.EventY)); err == nil {
-			rootX, rootY = lx+o.area.X, ly+o.area.Y
+			rootX, rootY = rootPoint(o.area, lx, ly)
 		}
 	}
 	if w.start != nil && w.start.open {
+		w.start.BeginDrag(rootX, rootY)
 		w.start.HandleButton(e, rootX, rootY)
+		return
+	}
+	if w.desktop != nil && w.desktop.surfaceFor(e.Window) != nil {
+		// A press on the desktop may turn into a pan, so the icon layer is
+		// asked whether it took the click and the pan starts either way.
+		if w.desktop.HandleButton(rootX, rootY) {
+			return
+		}
+		w.beginPan(rootX, rootY)
+	}
+}
+
+// beginPan starts dragging the desktop with the pointer.
+func (w *WM) beginPan(rootX, rootY int) {
+	w.canvas.BeginDrag(rootX, rootY)
+}
+
+// onScroll pans the desktop or pages the start screen. Buttons 4 and 5 are the
+// vertical wheel, 6 and 7 the horizontal one.
+func (w *WM) onScroll(e x11.ButtonPress) {
+	horizontal := e.Button == 6 || e.Button == 7
+	if w.start != nil && w.start.open {
+		switch e.Button {
+		case 4:
+			w.start.Page(-1)
+		case 5:
+			w.start.Page(1)
+		case 6:
+			w.start.Page(-1)
+		case 7:
+			w.start.Page(1)
+		}
+		return
+	}
+	notches := -1
+	switch e.Button {
+	case 5, 7:
+		notches = 1
+	case 4, 6:
+		notches = -1
+	default:
+		return
+	}
+	w.canvas.PanByNotches(notches, horizontal)
+	w.desktopPainted()
+}
+
+// panCanvas moves the desktop and repaints everything that lives on it: the
+// wallpaper, the icons and the frames of the windows.
+func (w *WM) panCanvas(dx, dy int) {
+	if dx == 0 && dy == 0 {
+		return
+	}
+	w.canvas.PanBy(dx, dy)
+	w.desktopPainted()
+}
+
+// desktopPainted repaints the layers of the desktop after it moved.
+func (w *WM) desktopPainted() {
+	if w.paper != nil {
+		w.paper.Repaint()
+	}
+	if w.desktop != nil {
+		w.desktop.repaint()
+	}
+	w.relayout()
+}
+
+// onButtonRelease ends a drag on the start screen or on the desktop.
+func (w *WM) onButtonRelease(x11.ButtonRelease) {
+	if w.start != nil {
+		w.start.EndDrag()
+	}
+	if w.canvas.EndDrag() {
+		// The pointer was panning the desktop, so the press did not mean a
+		// click on the empty desktop.
+		return
+	}
+	if w.desktop != nil {
+		w.desktop.Deselect()
 	}
 }
 
 func (w *WM) onMotion(e x11.MotionNotify) {
-	if w.start == nil || !w.start.open {
+	if w.start != nil && w.start.open && w.overlayFor(e.Window) != nil {
+		if w.start.dragging {
+			w.start.DragTo(int(e.RootX), int(e.RootY))
+			return
+		}
+		w.start.HandleMotion(int(e.RootX), int(e.RootY))
 		return
 	}
-	if w.overlayFor(e.Window) == nil {
-		return
+	if w.canvas.dragging && w.canvas.DragTo(int(e.RootX), int(e.RootY)) {
+		w.desktopPainted()
 	}
-	w.start.HandleMotion(int(e.RootX), int(e.RootY))
 }
 
 func (w *WM) onEnter(e x11.EnterNotify) {
@@ -447,6 +585,10 @@ func (w *WM) onExpose(e x11.Expose) {
 	}
 	if w.start != nil && w.overlayFor(e.Window) != nil {
 		w.start.HandleExpose(e.Window)
+		return
+	}
+	if w.desktop != nil && w.desktop.surfaceFor(e.Window) != nil {
+		w.desktop.HandleExpose(e.Window)
 		return
 	}
 	// Frames are filled with a solid colour, so a full repaint is enough.

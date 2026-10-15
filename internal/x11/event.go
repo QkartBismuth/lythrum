@@ -40,7 +40,9 @@ static void ly_install_handlers(void) {
 	XSetIOErrorHandler(ly_io_error_handler);
 }
 
-static void ly_collect_errors(ly_event *slot, int armed) {
+// ly_collect_errors arms the shared error slot around a call. It is the only
+// symbol of this file the rest of the package uses, so it is not static.
+void ly_collect_errors(ly_event *slot, int armed) {
 	ly_error_slot = slot;
 	ly_error_armed = armed;
 }

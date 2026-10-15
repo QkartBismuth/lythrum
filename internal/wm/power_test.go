@@ -34,9 +34,10 @@ func TestPowerCommandsFallBackInOrder(t *testing.T) {
 
 func TestPowerCommandsLogoutUsesTheSession(t *testing.T) {
 	t.Setenv("XDG_SESSION_ID", "42")
+	t.Setenv("USER", "u")
 	got := powerCommands("logout")
-	if len(got) != 1 {
-		t.Fatalf("logout commands = %v, want one entry", got)
+	if len(got) == 0 {
+		t.Fatal("logging out has to have something to run")
 	}
 	want := []string{"loginctl", "terminate-session", "42"}
 	for i := range want {
@@ -44,9 +45,28 @@ func TestPowerCommandsLogoutUsesTheSession(t *testing.T) {
 			t.Fatalf("logout command = %v, want %v", got[0], want)
 		}
 	}
+	// The session of the display manager has to be tried too, otherwise a
+	// session that logind does not know about leaves the user stuck.
+	if got[len(got)-1][0] != "loginctl" || got[len(got)-1][1] != "terminate-user" {
+		t.Errorf("logout fallback = %v, want a terminate-user at the end", got)
+	}
+
 	t.Setenv("XDG_SESSION_ID", "")
-	if got := powerCommands("logout"); len(got) != 0 {
-		t.Errorf("logout without a session = %v, want nothing to run", got)
+	for _, cmd := range powerCommands("logout") {
+		if cmd[0] == "loginctl" && cmd[1] == "terminate-session" {
+			t.Errorf("without a session id there is nothing to terminate: %v", got)
+		}
+	}
+}
+
+// TestLogoutIsAlwaysAvailable checks that logging out is never greyed out: the
+// shell can always leave, and that is the only way out of a bare X session.
+func TestLogoutIsAlwaysAvailable(t *testing.T) {
+	t.Setenv("XDG_SESSION_ID", "")
+	t.Setenv("PATH", t.TempDir())
+	ok, _ := powerAvailable("logout", "выйти")
+	if !ok {
+		t.Error("logging out must stay available even without systemctl and loginctl")
 	}
 }
 

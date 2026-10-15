@@ -11,12 +11,12 @@ import (
 	"lythrum/internal/config"
 	"lythrum/internal/layout"
 	"lythrum/internal/media"
-	"lythrum/internal/x11"
 )
 
-// wallpapers paints the desktop background. A still picture is uploaded once,
-// an animated GIF or a video is refreshed from the event loop so the whole
-// shell animates without a second thread touching X.
+// wallpapers decodes the desktop background. The picture itself belongs to the
+// desktop layer, which paints it under the icons: a second window for the
+// wallpaper could not be cleared when the desktop is panned, and the icons
+// would leave their trails behind.
 type wallpapers struct {
 	wm       *WM
 	surfaces []wallpaper
@@ -26,8 +26,6 @@ type wallpapers struct {
 
 // wallpaper is one monitor worth of background.
 type wallpaper struct {
-	win      x11.Window
-	gc       x11.GC
 	area     layout.Rect
 	source   media.Source
 	throttle *media.Throttle
@@ -36,8 +34,6 @@ type wallpaper struct {
 	// static remembers a picture that only has to be uploaded once.
 	static bool
 	failed bool
-	// broken retires a surface whose window has gone away.
-	broken bool
 }
 
 func newWallpapers(w *WM) *wallpapers {
@@ -99,32 +95,7 @@ func (s *wallpapers) openSurface(path string, area layout.Rect) (*wallpaper, err
 	if err != nil {
 		return nil, err
 	}
-	win, err := s.wm.d.CreateWindow(x11.CreateWindowParams{
-		Parent:           s.wm.d.Root(),
-		X:                area.X,
-		Y:                area.Y,
-		Width:            uint(area.W),
-		Height:           uint(area.H),
-		Class:            x11.ClassInputOutput,
-		BackPixel:        0x00101014,
-		OverrideRedirect: true,
-	})
-	if err != nil {
-		source.Close()
-		return nil, err
-	}
-	gc, err := s.wm.d.CreateGC(win)
-	if err != nil {
-		source.Close()
-		s.wm.d.DestroyWindow(win)
-		return nil, err
-	}
-	s.wm.d.MapWindow(win)
-	// The background must sit below every managed window.
-	s.wm.d.Restack(win, 0, restackBelow)
 	return &wallpaper{
-		win:      win,
-		gc:       gc,
 		area:     area,
 		source:   source,
 		throttle: media.NewThrottle(source, opts.FPS),
@@ -146,7 +117,7 @@ func (s *wallpapers) Active() bool {
 		return false
 	}
 	for i := range s.surfaces {
-		if !s.surfaces[i].static && !s.surfaces[i].broken {
+		if !s.surfaces[i].static {
 			return true
 		}
 	}
@@ -169,6 +140,15 @@ func (s *wallpapers) Interval() time.Duration {
 	return d
 }
 
+// Repaint hands the current picture to the desktop layer again, which is what
+// the pannable desktop calls after the view has moved.
+func (s *wallpapers) Repaint() {
+	for i := range s.surfaces {
+		s.surfaces[i].failed = false
+	}
+	s.Tick(true)
+}
+
 // Tick advances every wallpaper by one frame when it is time.
 func (s *wallpapers) Tick(force bool) {
 	if s == nil || len(s.surfaces) == 0 {
@@ -177,9 +157,6 @@ func (s *wallpapers) Tick(force bool) {
 	now := time.Now()
 	for i := range s.surfaces {
 		surface := &s.surfaces[i]
-		if surface.broken {
-			continue
-		}
 		if surface.static {
 			if !force || surface.failed {
 				continue
@@ -206,34 +183,28 @@ func (s *wallpapers) Tick(force bool) {
 	}
 }
 
+// paint dims the frame and hands it to the desktop layer, which draws it under
+// the icons of that monitor.
 func (s *wallpapers) paint(surface *wallpaper, img *image.RGBA) {
-	if img == nil {
+	if img == nil || s.wm.desktop == nil {
 		return
 	}
 	if surface.dim > 0 {
 		img = dimImage(img, surface.dim)
 	}
-	if err := s.wm.d.UploadImageOver(surface.win, surface.gc, img, 0, 0, wallpaperBackdrop); err != nil {
-		s.dropBroken(surface, err)
-		return
-	}
-	s.wm.d.Flush()
+	s.wm.desktop.SetWallpaper(surface.area, img)
 }
 
-// dropBroken decides whether a failed upload is worth retrying. A window that
-// no longer exists cannot be painted into again, so the surface is retired
-// instead of failing on every frame until the next reload.
-func (s *wallpapers) dropBroken(surface *wallpaper, err error) {
-	if surface.broken {
-		return
+// mod returns a non-negative remainder, which is what a tiled offset needs.
+func mod(a, b int) int {
+	if b == 0 {
+		return 0
 	}
-	if _, attrsErr := s.wm.d.Attributes(surface.win); attrsErr != nil {
-		surface.broken = true
-		surface.static = true
-		s.wm.log.Debug("retired a wallpaper window", "window", uint32(surface.win), "error", err)
-		return
+	m := a % b
+	if m < 0 {
+		m += b
 	}
-	s.wm.log.Debug("cannot paint the wallpaper", "error", err)
+	return m
 }
 
 // Shutdown stops the wallpaper players for good.
@@ -252,36 +223,31 @@ func (s *wallpapers) Close() {
 		return
 	}
 	for i := range s.surfaces {
-		surface := &s.surfaces[i]
-		if surface.source != nil {
+		if surface := &s.surfaces[i]; surface.source != nil {
 			_ = surface.source.Close()
-		}
-		if surface.gc.Valid() {
-			s.wm.d.FreeGC(surface.gc)
-		}
-		if surface.win != 0 {
-			s.wm.d.DestroyWindow(surface.win)
 		}
 	}
 	s.surfaces = nil
 }
 
-// wallpaperBackdrop fills the parts of a picture that are not transparent.
+// wallpaperBackdrop fills the parts of a picture that are not transparent, and
+// wallpaperBackdropPixel is the plain colour of a desktop without a wallpaper.
 var wallpaperBackdrop = color.RGBA{R: 0x10, G: 0x10, B: 0x14, A: 0xff}
 
-// restackBelow is the X restack mode that puts a window at the bottom.
-const restackBelow = 0
+const wallpaperBackdropPixel = 0x00101014
 
-// dimImage darkens a picture by a factor between zero and one.
+// dimImage darkens a picture: zero leaves it alone, one turns it black. The
+// setting is read the same way everywhere else, where wallpaper_dim is the
+// share of the light that is taken away, not the share that is left.
 func dimImage(src *image.RGBA, factor float64) *image.RGBA {
 	if factor <= 0 {
 		return src
 	}
-	if factor > 1 {
+	if factor >= 1 {
 		factor = 1
 	}
 	out := image.NewRGBA(src.Bounds())
-	keep := uint8(float64(255) * factor)
+	keep := uint8(float64(255) * (1 - factor))
 	for i := 0; i+3 < len(src.Pix); i += 4 {
 		out.Pix[i+0] = uint8(int(src.Pix[i+0]) * int(keep) / 255)
 		out.Pix[i+1] = uint8(int(src.Pix[i+1]) * int(keep) / 255)

@@ -13,9 +13,16 @@ type Client struct {
 	wm *WM
 	id x11.Window
 
-	frame   x11.Window
-	info    x11.ClientInfo
-	geom    layout.Rect
+	frame x11.Window
+	info  x11.ClientInfo
+	geom  layout.Rect
+	// asked is the geometry the client asked for before the tiling took it
+	// over. Floating a window gives it back this place.
+	asked layout.Rect
+	// placed is where the frame was last put on the screen. The canvas place
+	// alone is not enough to skip a placement: the view may have moved since,
+	// and the window has to follow it.
+	placed  layout.Rect
 	monitor int
 	desktop uint32
 
@@ -54,6 +61,20 @@ func (c *Client) Focused() bool { return c.wm.focused == c }
 // Floating reports whether the client is exempt from tiling.
 func (c *Client) Floating() bool { return c.floating }
 
+// ToggleFloating lifts a window out of the tiling and puts it back. A window
+// that becomes free returns to the place it asked for, so it does not stay
+// stretched over the whole screen.
+func (c *Client) ToggleFloating() {
+	c.floating = !c.floating
+	if c.floating && !c.asked.Empty() {
+		// A floating window keeps its own place, so the layout will not move
+		// it: the new geometry has to be applied right away.
+		c.geom = c.asked
+		c.wm.applyGeometry(c, c.geom, true)
+	}
+	c.wm.relayout()
+}
+
 // manage takes ownership of a window: it reads the client properties, frames
 // the window, maps it and focuses it if the configuration says so.
 func (w *WM) manage(id x11.Window) *Client {
@@ -86,7 +107,6 @@ func (w *WM) manage(id x11.Window) *Client {
 
 	d.SetWMState(id, x11.StateNormal)
 	d.MapRaised(c.frame)
-
 	if w.cfg.FocusNewWindows {
 		w.focus(c)
 	}
@@ -129,18 +149,27 @@ func (c *Client) createFrame() error {
 	if height <= 0 {
 		height = 480
 	}
-	x, y := int(geom.X), int(geom.Y)
+	// The client asks for a place on the screen; the shell keeps every window
+	// in canvas coordinates, so the screen position is turned into a place on
+	// the desktop first.
+	x, y := w.canvas.ToCanvas(int(geom.X), int(geom.Y))
+
+	c.asked = layout.Rect{X: x, Y: y, W: width, H: height}
 
 	frame, err := d.CreateWindow(x11.CreateWindowParams{
-		Parent:    d.Root(),
-		X:         x,
-		Y:         y,
-		Width:     uint(width + 2*w.cfg.Border),
-		Height:    uint(height + w.cfg.Border + w.cfg.TitleBar),
-		Class:     x11.ClassInputOutput,
-		BackPixel: w.color(w.cfg.TitleBackground),
-		EventMask: x11.SubstructureRedirectMask | x11.SubstructureNotifyMask |
-			x11.ButtonPressMask | x11.EnterWindowMask | x11.PointerMotionMask |
+		Parent: d.Root(),
+		X:      x - w.canvas.offset.X,
+		Y:      y - w.canvas.offset.Y,
+		Width:  uint(width + 2*w.cfg.Border),
+		Height: uint(height + w.cfg.Border + w.cfg.TitleBar),
+		Class:  x11.ClassInputOutput,
+		// A frame is decoration of the window manager itself: without
+		// override-redirect the manager would try to frame its own frame.
+		OverrideRedirect: true,
+		BackPixel:        w.color(w.cfg.TitleBackground),
+		// No SubstructureRedirect on the frame: the manager must not get in
+		// the way of mapping the client it just put inside.
+		EventMask: x11.ButtonPressMask | x11.EnterWindowMask | x11.PointerMotionMask |
 			x11.ExposureMask | x11.StructureNotifyMask | x11.FocusChangeMask,
 	})
 	if err != nil {
@@ -152,6 +181,11 @@ func (c *Client) createFrame() error {
 		x11.FocusChangeMask|x11.EnterWindowMask|x11.VisibilityChangeMask)
 	d.ReparentWindow(c.id, frame, w.cfg.Border, w.cfg.Border+w.cfg.TitleBar)
 	d.MapRaised(frame)
+	// The map request of the client was intercepted, so the manager is the one
+	// that has to map it. Without this the window stays unmapped and the
+	// application looks like it never started.
+	d.MapRaised(c.id)
+	c.mapped = true
 	return nil
 }
 
@@ -178,7 +212,8 @@ func (w *WM) unmanage(c *Client, destroy bool) {
 	}
 
 	if c.frame != 0 {
-		d.ReparentWindow(c.id, d.Root(), c.geom.X, c.geom.Y)
+		place := w.canvas.ToRootRect(c.geom)
+		d.ReparentWindow(c.id, d.Root(), place.X, place.Y)
 		d.UnmapWindow(c.frame)
 		d.DestroyWindow(c.frame)
 		c.frame = 0
@@ -266,8 +301,8 @@ func (w *WM) focus(c *Client) {
 	_ = w.d.SetActiveWindow(c.id)
 	if w.cfg.FollowMouse {
 		// Centre the pointer on the newly focused window.
-		g := c.geom
-		w.d.WarpPointer((g.X + g.W/2), (g.Y + g.H/2))
+		g := w.canvas.ToRootRect(c.geom)
+		w.d.WarpPointer(g.X+g.W/2, g.Y+g.H/2)
 	}
 	w.updateFrameColors()
 }
@@ -332,7 +367,9 @@ func (w *WM) arrange() map[x11.Window]layout.Rect {
 		tileable = append(tileable, c)
 	}
 
-	work := w.workArea(0)
+	// Tiling fills the part of the desktop the screen shows right now, so the
+	// windows follow the view when it is panned.
+	work := w.canvas.Viewport(w.workArea(0))
 	switch w.layout {
 	case layout.LayoutTiled:
 		for i, c := range tileable {
@@ -359,24 +396,32 @@ func (w *WM) relayout() {
 		if !ok {
 			continue
 		}
-		w.applyGeometry(c, r)
+		w.applyGeometry(c, r, false)
 	}
 	w.syncEWMH()
 }
 
 // applyGeometry moves the frame of a client and resizes the client inside it.
-func (w *WM) applyGeometry(c *Client, r layout.Rect) {
+// A forced call places the window even when the geometry did not change, which
+// is what a window that just became floating needs.
+func (w *WM) applyGeometry(c *Client, r layout.Rect, force bool) {
 	d := w.d
 	opts := w.cfg.LayoutOptions()
-	if r == c.geom {
+	root := w.canvas.ToRootRect(r)
+	if r == c.geom && root == c.placed && !force {
 		return
 	}
-	c.geom = r
+	c.geom, c.placed = r, root
 
 	if c.frame != 0 {
-		d.MoveWindow(c.frame, r.X, r.Y)
+		d.MoveWindow(c.frame, root.X, root.Y)
 		d.ResizeWindow(c.frame, uint32(r.W+2*opts.Border), uint32(r.H+opts.Border+opts.TitleBar))
-		d.ConfigureWindow(c.frame, 0, 0, 0, 0, 0, 0, 0, 0)
+		if c.mapped {
+			// Some servers unmap the children of a window they resize, so the
+			// client has to be mapped again or the application looks like it
+			// vanished the moment the tiling moved it.
+			d.MapRaised(c.id)
+		}
 	}
 	d.MoveWindow(c.id, opts.Border, opts.Border+opts.TitleBar)
 	d.ResizeWindow(c.id, uint32(max(r.W, 1)), uint32(max(r.H, 1)))

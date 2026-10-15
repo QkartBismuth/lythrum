@@ -19,6 +19,11 @@ func (r Rect) Bottom() int { return r.Y + r.H }
 // Area is the number of pixels the rectangle covers.
 func (r Rect) Area() int { return max(r.W, 0) * max(r.H, 0) }
 
+// Intersects reports whether two rectangles share any area.
+func (r Rect) Intersects(o Rect) bool {
+	return r.X < o.Right() && o.X < r.Right() && r.Y < o.Bottom() && o.Y < r.Bottom()
+}
+
 // Contains reports whether the point lies inside the rectangle.
 func (r Rect) Contains(x, y int) bool {
 	return x >= r.X && x < r.Right() && y >= r.Y && y < r.Bottom()
