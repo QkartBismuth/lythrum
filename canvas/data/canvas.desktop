@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Canvas
+Name[ru]=Canvas
+GenericName=Desktop Session
+GenericName[ru]=Сессия рабочего стола
+Comment=Infinite board session with application windows placed on the canvas
+Comment[ru]=Сессия-доска: окна приложений живут прямо на холсте
+Exec=canvas --session
+TryExec=canvas
+Icon=canvas
+Terminal=false
+NoDisplay=false
+X-GDM-SessionRegisters=true
+Keywords=Desktop;Session;Canvas;Board;Холст;Доска;ОС;

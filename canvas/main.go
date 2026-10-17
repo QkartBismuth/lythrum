@@ -142,9 +142,29 @@ func main() {
 	screen := C.XDefaultScreen(dpy)
 	root := C.XDefaultRootWindow(dpy)
 
+	// --session turns the board into a desktop session a display manager can
+	// offer in place of a full desktop environment such as KDE.
+	session := false
+	for _, a := range os.Args[1:] {
+		if a == "--session" || a == "-s" {
+			session = true
+		}
+	}
+	if session {
+		os.Setenv("XDG_CURRENT_DESKTOP", "Canvas")
+		os.Setenv("XDG_SESSION_DESKTOP", "canvas")
+		os.Setenv("DESKTOP_SESSION", "canvas")
+	}
+
+	wx, wy, ww, wh := 40, 40, 900, 620
+	if session {
+		wx, wy = 0, 0
+		ww = int(C.XDisplayWidth(dpy, screen))
+		wh = int(C.XDisplayHeight(dpy, screen))
+	}
 	win := C.XCreateSimpleWindow(
 		dpy, root,
-		40, 40, 900, 620, 0,
+		C.int(wx), C.int(wy), C.uint(ww), C.uint(wh), 0,
 		C.XBlackPixel(dpy, screen),
 		C.XWhitePixel(dpy, screen),
 	)
@@ -202,10 +222,15 @@ func main() {
 
 	fmt.Printf("board: showing %s\n", v.root)
 	fmt.Println("  dbl-click   open in a real application window")
-	fmt.Println("  t           terminal   drag pan   wheel zoom at pointer")
+	fmt.Println("  t / super+r terminal   drag pan   wheel zoom at pointer")
 	fmt.Println("  shift+wheel pan left/right      ctrl+wheel  pan up/down")
 	fmt.Println("  arrows      pan        + / -       zoom")
 	fmt.Println("  f fit       F5 refresh  r recenter 0 zoom 100%  q quit")
+	fmt.Println("  ctrl+r      restart the board")
+	if session {
+		fmt.Printf("session: Canvas desktop, apps=%q\n", os.Getenv("CANVAS_SESSION_APPS"))
+		v.startSession()
+	}
 
 	v.paint()
 	v.blit()
@@ -377,6 +402,17 @@ func (v *view) onMotion(me *C.XMotionEvent) {
 func (v *view) onKey(ke *C.XKeyEvent) {
 	ks := C.XLookupKeysym(ke, 0)
 	shift := ke.state&C.ShiftMask != 0
+	if ks == 'r' || ks == 'R' {
+		if ke.state&C.Mod4Mask != 0 { // Super+R: open a terminal (kitty first)
+			v.launchTerminal()
+			v.redraw = true
+			return
+		}
+		if ke.state&C.ControlMask != 0 { // Ctrl+R: restart the board in place
+			v.restart()
+			return
+		}
+	}
 	cx, cy := float64(v.w)/2, float64(v.h)/2
 	switch ks {
 	case 0xff1b, 'q': // Escape, q
@@ -482,12 +518,46 @@ func (v *view) reload(reset bool) {
 // launch starts a real application and remembers where on the board its first
 // mapped top-level window should be adopted.
 func (v *view) launch(target string, isDir bool, cx, cy float64) {
+	v.spawn(appCommand(target, isDir), cx, cy)
+}
+
+func (v *view) launchTerminal() {
+	cx := v.ox + float64(v.w)/(2*v.zoom)
+	cy := v.oy + float64(v.h)/(2*v.zoom)
+	var argv []string
+	if t := os.Getenv("CANVAS_TERMINAL"); t != "" {
+		argv = strings.Fields(t)
+	} else {
+		argv = terminalCommand()
+	}
+	if len(argv) == 0 {
+		fmt.Fprintln(os.Stderr, "canvas: no terminal found")
+		return
+	}
+	v.spawn(argv, cx, cy)
+}
+
+// terminalCommand picks the first terminal emulator present on the system.
+func terminalCommand() []string {
+	for _, n := range []string{"kitty", "foot", "alacritty", "xterm", "konsole", "xfce4-terminal"} {
+		if p, err := exec.LookPath(n); err == nil {
+			return []string{p}
+		}
+	}
+	return nil
+}
+
+// spawn runs an application and remembers the board point where its first
+// mapped top-level window should be adopted.
+func (v *view) spawn(argv []string, cx, cy float64) {
+	if len(argv) == 0 {
+		return
+	}
 	v.pending = &pendingLaunch{
 		cx: cx, cy: cy,
 		before: v.rootChildren(),
 		until:  time.Now().Add(10 * time.Second),
 	}
-	argv := appCommand(target, isDir)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = v.root
 	if err := cmd.Start(); err != nil {
@@ -499,37 +569,45 @@ func (v *view) launch(target string, isDir bool, cx, cy float64) {
 	fmt.Printf("canvas: launched %s\n", strings.Join(argv, " "))
 }
 
-func (v *view) launchTerminal() {
-	cx := v.ox + float64(v.w)/(2*v.zoom)
-	cy := v.oy + float64(v.h)/(2*v.zoom)
-	var argv []string
-	if t := os.Getenv("CANVAS_TERMINAL"); t != "" {
-		argv = strings.Fields(t)
-	} else {
-		for _, n := range []string{"kitty", "xterm", "foot", "alacritty", "konsole", "xfce4-terminal"} {
-			if p, err := exec.LookPath(n); err == nil {
-				argv = []string{p}
-				break
-			}
+// startSession fills a freshly started desktop session: CANVAS_SESSION_APPS
+// lists the programs to open (one per ';'), and with no list a terminal opens
+// so the board is immediately usable.
+func (v *view) startSession() {
+	apps := strings.TrimSpace(os.Getenv("CANVAS_SESSION_APPS"))
+	if apps == "" {
+		v.launchTerminal()
+		return
+	}
+	for _, line := range strings.Split(apps, ";") {
+		argv := strings.Fields(line)
+		if len(argv) == 0 {
+			continue
 		}
+		cx := v.ox + float64(v.w)/(2*v.zoom)
+		cy := v.oy + float64(v.h)/(2*v.zoom)
+		v.spawn(argv, cx, cy)
 	}
-	if len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "canvas: no terminal found")
+}
+
+// restart relaunches the board as a fresh process with the same arguments and
+// environment. The current connection is closed first, which tears down the
+// board window together with any adopted child windows, so the new instance
+// starts from a clean slate.
+func (v *view) restart() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "canvas: restart:", err)
 		return
 	}
-	v.pending = &pendingLaunch{
-		cx: cx, cy: cy,
-		before: v.rootChildren(),
-		until:  time.Now().Add(10 * time.Second),
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = v.root
+	C.XCloseDisplay(v.dpy)
+	cmd := exec.Command(exe, os.Args[1:]...)
+	cmd.Env = os.Environ()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
-		v.pending = nil
-		fmt.Fprintln(os.Stderr, "canvas: launch:", err)
-		return
+		fmt.Fprintln(os.Stderr, "canvas: restart:", err)
+		os.Exit(1)
 	}
-	go func() { _ = cmd.Wait() }()
+	os.Exit(0)
 }
 
 // appCommand prefers a real file manager for folders; CANVAS_FILEMANAGER can
@@ -912,7 +990,7 @@ func (v *view) hud() {
 	v.text(14, 43, fmt.Sprintf("x=%.0f  y=%.0f  zoom=%.0f%%  items=%d  windows=%d",
 		v.ox+float64(v.w)/(2*v.zoom), v.oy+float64(v.h)/(2*v.zoom),
 		v.zoom*100, len(v.icons), len(v.wins)), hudCol)
-	v.text(14, v.h-12, "dbl-click open   t terminal   drag pan   wheel zoom   f fit   F5 refresh   q quit", hudCol)
+	v.text(14, v.h-12, "dbl-click open   t/super+r terminal   drag pan   wheel zoom   f fit   F5 refresh   ctrl+r restart   q quit", hudCol)
 }
 
 // sx / sy map board coordinates to window pixels.
