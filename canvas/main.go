@@ -71,6 +71,27 @@ type boardIcon struct {
 	x, y, w, h float64 // cell rectangle in board coordinates
 }
 
+// managedWin is a real application window reparented into the board. Its
+// geometry is kept in board units so it stays glued to the canvas while the
+// viewport pans and zooms.
+type managedWin struct {
+	win C.Window
+	bx  float64 // board position of the window's top-left corner
+	by  float64
+	bw  float64 // board size (screen size = board size * zoom)
+	bh  float64
+
+	lastX, lastY, lastW, lastH int
+}
+
+// pendingLaunch remembers which top-level window to adopt once a freshly
+// started application maps it.
+type pendingLaunch struct {
+	cx, cy float64 // board point where the window should be centred
+	before map[C.Window]bool
+	until  time.Time
+}
+
 type view struct {
 	dpy    *C.Display
 	screen C.int
@@ -89,9 +110,10 @@ type view struct {
 	ox, oy float64 // board coordinate shown at the viewport's top-left pixel
 	zoom   float64
 
-	root     string // desktop folder; navigation never goes above it
-	dir      string // folder currently shown
+	root     string // desktop folder, the single source of shortcuts
 	icons    []boardIcon
+	wins     []managedWin
+	pending  *pendingLaunch
 	selected int
 	pressed  int
 	pressX   int
@@ -133,7 +155,9 @@ func main() {
 
 	C.XSelectInput(dpy, win,
 		C.ExposureMask|C.KeyPressMask|C.ButtonPressMask|C.ButtonReleaseMask|
-			C.PointerMotionMask|C.StructureNotifyMask)
+			C.PointerMotionMask|C.StructureNotifyMask|C.SubstructureNotifyMask)
+	// Watch top-level windows so a freshly launched application can be adopted.
+	C.XSelectInput(dpy, root, C.SubstructureNotifyMask)
 
 	C.XStoreName(dpy, win, C.CString("Board - Go / X11"))
 
@@ -171,15 +195,14 @@ func main() {
 	if v.root == "" {
 		v.root = desktopDir()
 	}
-	v.dir = v.root
 	v.reload(true)
 
 	C.XMapWindow(dpy, win)
 	C.XFlush(dpy)
 
-	fmt.Printf("board: showing %s\n", v.dir)
-	fmt.Println("  dbl-click   open / enter folder")
-	fmt.Println("  drag        pan        wheel       zoom at pointer")
+	fmt.Printf("board: showing %s\n", v.root)
+	fmt.Println("  dbl-click   open in a real application window")
+	fmt.Println("  t           terminal   drag pan   wheel zoom at pointer")
 	fmt.Println("  shift+wheel pan left/right      ctrl+wheel  pan up/down")
 	fmt.Println("  arrows      pan        + / -       zoom")
 	fmt.Println("  f fit       F5 refresh  r recenter 0 zoom 100%  q quit")
@@ -220,6 +243,10 @@ func (v *view) handle(xev *C.XEvent) {
 		v.needBlit = true
 	case C.ConfigureNotify:
 		ce := (*C.XConfigureEvent)(unsafe.Pointer(xev))
+		// Child windows report their own size here too; only our window resizes the board.
+		if ce.window != v.win {
+			return
+		}
 		w, h := int(ce.width), int(ce.height)
 		if w != v.w || h != v.h {
 			v.resize(w, h)
@@ -233,6 +260,16 @@ func (v *view) handle(xev *C.XEvent) {
 		v.onMotion((*C.XMotionEvent)(unsafe.Pointer(xev)))
 	case C.KeyPress:
 		v.onKey((*C.XKeyEvent)(unsafe.Pointer(xev)))
+	case C.MapNotify:
+		me := (*C.XMapEvent)(unsafe.Pointer(xev))
+		v.onMap(me.window)
+	case C.DestroyNotify:
+		de := (*C.XDestroyWindowEvent)(unsafe.Pointer(xev))
+		if de.window == v.win {
+			C.XCloseDisplay(v.dpy)
+			os.Exit(0)
+		}
+		v.forget(de.window)
 	case C.ClientMessage:
 		ce := (*C.XClientMessageEvent)(unsafe.Pointer(xev))
 		if ce.message_type == v.wmDelete {
@@ -357,6 +394,8 @@ func (v *view) onKey(ke *C.XKeyEvent) {
 		v.reload(false)
 	case 'f':
 		v.fit()
+	case 't':
+		v.launchTerminal()
 	case '0':
 		v.zoomAt(cx, cy, 1/v.zoom)
 	case 0xff51: // Left
@@ -397,15 +436,7 @@ func (v *view) openIcon(i int) {
 		return
 	}
 	ic := v.icons[i]
-	if !ic.isDir {
-		openPath(ic.path)
-		return
-	}
-	if rel, err := filepath.Rel(v.root, ic.path); err != nil || strings.HasPrefix(rel, "..") {
-		return
-	}
-	v.dir = ic.path
-	v.reload(true)
+	v.launch(ic.path, ic.isDir, ic.x+ic.w/2, ic.y+ic.h/2)
 }
 
 func (v *view) reload(reset bool) {
@@ -413,15 +444,7 @@ func (v *view) reload(reset bool) {
 	v.pressed = -1
 	v.lastIdx = -1
 
-	var icons []boardIcon
-	if v.dir != v.root {
-		icons = append(icons, boardIcon{
-			name: "..", path: filepath.Dir(v.dir), isDir: true, up: true,
-			col: folderCol,
-		})
-	}
-
-	ents, err := os.ReadDir(v.dir)
+	ents, err := os.ReadDir(v.root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "canvas: readdir:", err)
 	}
@@ -431,7 +454,7 @@ func (v *view) reload(reset bool) {
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		ic := boardIcon{name: name, path: filepath.Join(v.dir, name), isDir: e.IsDir()}
+		ic := boardIcon{name: name, path: filepath.Join(v.root, name), isDir: e.IsDir()}
 		if ic.isDir {
 			ic.col = folderCol
 			dirs = append(dirs, ic)
@@ -447,15 +470,174 @@ func (v *view) reload(reset bool) {
 	}
 	less(dirs)
 	less(files)
-	icons = append(icons, dirs...)
-	icons = append(icons, files...)
-	v.icons = icons
+	v.icons = append(dirs, files...)
 	v.layout()
 
 	if reset {
 		v.fit()
 	}
 	v.redraw = true
+}
+
+// launch starts a real application and remembers where on the board its first
+// mapped top-level window should be adopted.
+func (v *view) launch(target string, isDir bool, cx, cy float64) {
+	v.pending = &pendingLaunch{
+		cx: cx, cy: cy,
+		before: v.rootChildren(),
+		until:  time.Now().Add(10 * time.Second),
+	}
+	argv := appCommand(target, isDir)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = v.root
+	if err := cmd.Start(); err != nil {
+		v.pending = nil
+		fmt.Fprintln(os.Stderr, "canvas: launch:", err)
+		return
+	}
+	go func() { _ = cmd.Wait() }()
+	fmt.Printf("canvas: launched %s\n", strings.Join(argv, " "))
+}
+
+func (v *view) launchTerminal() {
+	cx := v.ox + float64(v.w)/(2*v.zoom)
+	cy := v.oy + float64(v.h)/(2*v.zoom)
+	var argv []string
+	if t := os.Getenv("CANVAS_TERMINAL"); t != "" {
+		argv = strings.Fields(t)
+	} else {
+		for _, n := range []string{"kitty", "xterm", "foot", "alacritty", "konsole", "xfce4-terminal"} {
+			if p, err := exec.LookPath(n); err == nil {
+				argv = []string{p}
+				break
+			}
+		}
+	}
+	if len(argv) == 0 {
+		fmt.Fprintln(os.Stderr, "canvas: no terminal found")
+		return
+	}
+	v.pending = &pendingLaunch{
+		cx: cx, cy: cy,
+		before: v.rootChildren(),
+		until:  time.Now().Add(10 * time.Second),
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = v.root
+	if err := cmd.Start(); err != nil {
+		v.pending = nil
+		fmt.Fprintln(os.Stderr, "canvas: launch:", err)
+		return
+	}
+	go func() { _ = cmd.Wait() }()
+}
+
+// appCommand prefers a real file manager for folders; CANVAS_FILEMANAGER can
+// override it (useful for testing without a desktop session).
+func appCommand(target string, isDir bool) []string {
+	if isDir {
+		if fm := os.Getenv("CANVAS_FILEMANAGER"); fm != "" {
+			return append(strings.Fields(fm), target)
+		}
+		for _, n := range []string{"thunar", "dolphin", "nautilus", "pcmanfm", "nemo"} {
+			if p, err := exec.LookPath(n); err == nil {
+				return []string{p, target}
+			}
+		}
+	}
+	return []string{"xdg-open", target}
+}
+
+func (v *view) rootChildren() map[C.Window]bool {
+	m := map[C.Window]bool{}
+	var rr, pr C.Window
+	var children *C.Window
+	var n C.uint
+	if C.XQueryTree(v.dpy, C.XDefaultRootWindow(v.dpy), &rr, &pr, &children, &n) == 0 {
+		return m
+	}
+	if children != nil {
+		for _, w := range unsafe.Slice(children, int(n)) {
+			m[w] = true
+		}
+		C.XFree(unsafe.Pointer(children))
+	}
+	return m
+}
+
+func (v *view) onMap(win C.Window) {
+	p := v.pending
+	if p == nil || win == v.win || p.before[win] || time.Now().After(p.until) {
+		return
+	}
+	v.pending = nil
+	v.adopt(win, p.cx, p.cy)
+}
+
+// adopt reparents a freshly launched top-level window into the canvas and
+// pins it to a board position.
+func (v *view) adopt(win C.Window, cx, cy float64) {
+	var attr C.XWindowAttributes
+	if C.XGetWindowAttributes(v.dpy, win, &attr) == 0 {
+		return
+	}
+	if attr.override_redirect != 0 || attr.width == 0 || attr.height == 0 {
+		return
+	}
+	bw := float64(attr.width) / v.zoom
+	bh := float64(attr.height) / v.zoom
+	C.XReparentWindow(v.dpy, win, v.win, 0, 0)
+	C.XSetWindowBorderWidth(v.dpy, win, 0)
+	C.XMapWindow(v.dpy, win)
+	v.wins = append(v.wins, managedWin{
+		win:   win,
+		bx:    cx - bw/2,
+		by:    cy - bh/2,
+		bw:    bw,
+		bh:    bh,
+		lastX: -1 << 30, lastY: -1 << 30, lastW: -1, lastH: -1,
+	})
+	v.placeWindows()
+	v.redraw = true
+	fmt.Printf("canvas: adopted window 0x%x %dx%d\n", uint64(win), attr.width, attr.height)
+}
+
+func (v *view) forget(win C.Window) {
+	for i := range v.wins {
+		if v.wins[i].win == win {
+			v.wins = append(v.wins[:i], v.wins[i+1:]...)
+			v.redraw = true
+			return
+		}
+	}
+}
+
+// placeWindows keeps every managed window glued to its board position and
+// scales it with the viewport zoom.
+func (v *view) placeWindows() {
+	changed := false
+	for i := range v.wins {
+		w := &v.wins[i]
+		x := v.sx(w.bx)
+		y := v.sy(w.by)
+		sw := int(math.Round(w.bw * v.zoom))
+		sh := int(math.Round(w.bh * v.zoom))
+		if sw < 80 {
+			sw = 80
+		}
+		if sh < 60 {
+			sh = 60
+		}
+		if x == w.lastX && y == w.lastY && sw == w.lastW && sh == w.lastH {
+			continue
+		}
+		C.XMoveResizeWindow(v.dpy, w.win, C.int(x), C.int(y), C.uint(sw), C.uint(sh))
+		w.lastX, w.lastY, w.lastW, w.lastH = x, y, sw, sh
+		changed = true
+	}
+	if changed {
+		C.XFlush(v.dpy)
+	}
 }
 
 func (v *view) layout() {
@@ -552,6 +734,7 @@ func (v *view) paint() {
 	v.axes()
 	v.drawIcons()
 	v.hud()
+	v.placeWindows()
 }
 
 // gridStep picks a 1/2/5-based spacing so the minor grid stays near gridPx
@@ -721,15 +904,15 @@ func (v *view) fileGlyph(tx, ty, tw int, c, bgc color) {
 }
 
 func (v *view) hud() {
-	path := v.dir
+	path := v.root
 	if home, err := os.UserHomeDir(); err == nil {
 		path = strings.Replace(path, home, "~", 1)
 	}
 	v.text(14, 22, path, hudCol)
-	v.text(14, 43, fmt.Sprintf("x=%.0f  y=%.0f  zoom=%.0f%%  items=%d",
+	v.text(14, 43, fmt.Sprintf("x=%.0f  y=%.0f  zoom=%.0f%%  items=%d  windows=%d",
 		v.ox+float64(v.w)/(2*v.zoom), v.oy+float64(v.h)/(2*v.zoom),
-		v.zoom*100, len(v.icons)), hudCol)
-	v.text(14, v.h-12, "dbl-click open   drag pan   wheel zoom   f fit   F5 refresh   q quit", hudCol)
+		v.zoom*100, len(v.icons), len(v.wins)), hudCol)
+	v.text(14, v.h-12, "dbl-click open   t terminal   drag pan   wheel zoom   f fit   F5 refresh   q quit", hudCol)
 }
 
 // sx / sy map board coordinates to window pixels.
@@ -841,15 +1024,6 @@ func desktopDir() string {
 		return d
 	}
 	return home
-}
-
-func openPath(p string) {
-	cmd := exec.Command("xdg-open", p)
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: open:", err)
-		return
-	}
-	go func() { _ = cmd.Wait() }()
 }
 
 func fileColor(name string) color {
