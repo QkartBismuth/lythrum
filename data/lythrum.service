@@ -1,5 +1,0 @@
-[D-BUS Service]
-Name=lythrum.service
-Exec=/usr/bin/lythrum
-User=username
-SystemdService=lythrum.service
