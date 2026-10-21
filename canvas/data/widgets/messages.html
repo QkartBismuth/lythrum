@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Сообщения</title></head>
+<body>
+  <div class="msgs" id="msgs"><div class="empty">Новых сообщений нет</div></div>
+  <script>
+    let last = "";
+    window.setMessage = function (text) {
+      if (!text || text === last) return;
+      last = text;
+      const box = document.getElementById("msgs");
+      box.innerHTML = "";
+      const e = document.createElement("div");
+      e.className = "msg";
+      e.textContent = text;
+      box.appendChild(e);
+    };
+  </script>
+</body></html>

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Панель управления</title></head>
+<body>
+  <div class="ctl">
+    <label>Яркость <input type="range" min="10" max="100" value="80" oninput="send('brightness', this.value)"></label>
+    <label>Звук <input type="range" min="0" max="100" value="50" oninput="send('volume', this.value)"></label>
+    <label class="row"><span>Wi-Fi</span><input type="checkbox" onchange="send('wifi', this.checked ? 1 : 0)"></label>
+    <div class="tray" id="tray"></div>
+  </div>
+  <script>
+    function send(cmd, value) { location.hash = cmd + ":" + value; }
+    window.setWindows = function (list) {
+      const tray = document.getElementById("tray");
+      tray.innerHTML = "";
+      const head = document.createElement("div");
+      head.className = "trayhead";
+      head.textContent = "Окна";
+      tray.appendChild(head);
+      list.forEach(w => {
+        const e = document.createElement("div");
+        e.className = "trayitem";
+        e.textContent = w.title;
+        e.onclick = () => send("closewin", w.index);
+        tray.appendChild(e);
+      });
+    };
+  </script>
+</body></html>

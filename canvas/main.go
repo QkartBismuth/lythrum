@@ -4,20 +4,44 @@
 package main
 
 /*
-#cgo pkg-config: x11 xft
+#cgo pkg-config: x11 xft xrender xcomposite xdamage
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
 #include <X11/cursorfont.h>
 #include <X11/Xft/Xft.h>
+#include <X11/extensions/Xrender.h>
+#include <X11/extensions/Xcomposite.h>
+#include <X11/extensions/Xdamage.h>
+
+// The last protocol error the shell ran into.
+static int canvas_last_error = 0;
+
+// canvas_expose asks an application to paint its window again.
+static void canvas_expose(Display *dpy, Window w);
+
+// The major opcode of the composite extension, and whether the server refused
+// to redirect a window into a pixmap.
+static int canvas_composite_opcode = -1;
+static int canvas_render_opcode = -1;
+static int canvas_no_composite = 0;
 
 // canvas_xerror keeps the default Xlib handler from terminating the whole
 // session on a recoverable protocol error (e.g. a key already grabbed by
 // someone else). Real errors are still reported on stderr.
 static int canvas_xerror(Display *dpy, XErrorEvent *ev) {
+	canvas_last_error = ev->error_code;
+	// A window that cannot be redirected into a pixmap cannot be shown as a
+	// miniature: the board draws it as it is. Under a compositor the server
+	// refuses to redirect the windows of the clients a second time.
+	if ((canvas_composite_opcode >= 0 && ev->request_code == canvas_composite_opcode) ||
+	    (canvas_render_opcode >= 0 && ev->request_code == canvas_render_opcode)) {
+		canvas_no_composite = 1;
+	}
 	if (ev->error_code != BadAccess) {
 		char buf[256];
 		XGetErrorText(dpy, ev->error_code, buf, sizeof buf);
@@ -29,6 +53,87 @@ static void canvas_ignore_badaccess(void) {
 	XSetErrorHandler(canvas_xerror);
 }
 static void canvas_destroy_image(XImage *img) { XDestroyImage(img); }
+
+// The rendering of a window can be sent into a pixmap, which the board then
+// draws scaled in the frame of the window. Not every server allows it.
+// The board needs the number of the composite extension to recognise the
+// errors of the redirection.
+static void canvas_set_composite_opcode(Display *dpy) {
+	int major = 0, event_base = 0, error_base = 0;
+	if (XQueryExtension(dpy, "Composite", &major, &event_base, &error_base)) {
+		canvas_composite_opcode = major;
+	}
+	if (XQueryExtension(dpy, "RENDER", &major, &event_base, &error_base)) {
+		canvas_render_opcode = major;
+	}
+}
+
+// The board gives up on the miniature when the server refuses to redirect a
+// window into a pixmap.
+static int canvas_composite_broken(void) {
+	return canvas_no_composite;
+}
+
+static int canvas_redirect(Display *dpy, Window win) {
+	canvas_last_error = 0;
+	// A single window is redirected: the server refuses to redirect the
+	// subwindows of a window automatically. The server does not paint the
+	// window on the screen: the board draws the content of the application
+	// itself, in the frame of the window on the canvas.
+	XCompositeRedirectWindow(dpy, win, False);
+	XSync(dpy, False);
+	if (canvas_last_error == 0 && !canvas_no_composite) {
+		// The application has to paint its window again: a redirected
+		// window keeps no content of its own.
+		canvas_expose(dpy, win);
+	}
+	return canvas_last_error == 0 && !canvas_no_composite;
+}
+
+// canvas_container creates the container that holds a managed window. The
+// window has no background of its own: the miniature the board paints shows
+// through it, and the application is clipped by its edges.
+static Window canvas_container(Display *dpy, Window parent, unsigned w,
+                               unsigned h) {
+	XSetWindowAttributes attr;
+	memset(&attr, 0, sizeof(attr));
+	attr.border_pixel = 0;
+	attr.override_redirect = False;
+	// No background of its own: the miniature the board paints shows through
+	// the container, and the application is clipped by its edges.
+	attr.background_pixmap = None;
+	attr.event_mask = SubstructureNotifyMask | ButtonPressMask |
+	                  ButtonReleaseMask | PointerMotionMask;
+	int screen = XDefaultScreen(dpy);
+	return XCreateWindow(dpy, parent, 0, 0, w, h, 0,
+	                     XDefaultDepth(dpy, screen), InputOutput,
+	                     XDefaultVisual(dpy, screen),
+	                     CWBorderPixel | CWEventMask | CWOverrideRedirect |
+	                     CWBackPixmap, &attr);
+}
+// canvas_expose asks an application to paint its window again. A redirected
+// window keeps no content of its own: the application has to draw it once
+// more, or the board would show what was on the screen before.
+static void canvas_expose(Display *dpy, Window w) {
+	XWindowAttributes attr;
+	XEvent ev;
+	XExposeEvent *ex = (XExposeEvent *)&ev;
+	int width = 0, height = 0;
+	if (XGetWindowAttributes(dpy, w, &attr)) {
+		width = attr.width;
+		height = attr.height;
+	}
+	ex->type = Expose;
+	ex->display = dpy;
+	ex->window = w;
+	ex->x = 0;
+	ex->y = 0;
+	ex->width = width;
+	ex->height = height;
+	ex->count = 0;
+	XSendEvent(dpy, w, False, ExposureMask, &ev);
+	XFlush(dpy);
+}
 */
 import "C"
 
@@ -49,6 +154,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -100,9 +206,8 @@ const (
 	gapY    = 12.0
 	perCol  = 5 // rows per column
 
-	winTitleH = 22 // title bar height, screen pixels
-	winGrip   = 16 // corner grip size, screen pixels
-	winClose  = 22 // close button size, screen pixels (equals the title bar)
+	winGrip  = 16 // corner grip size, screen pixels
+	winClose = 22 // close button size, screen pixels (equals the title bar)
 
 	thumbSize = 256 // generated thumbnail edge, screen pixels squared cache
 	wallFps   = 12  // target frame rate of animated wallpapers
@@ -119,6 +224,7 @@ type boardIcon struct {
 	col   color
 
 	thumb image.Image // decoded preview (photo, video poster, gif frame)
+	anim  *gifAnim    // the frames of an animated gif
 
 	x, y, w, h float64 // cell rectangle in board coordinates
 }
@@ -130,19 +236,62 @@ type menuItem struct {
 	do    func()
 }
 
-// managedWin is a real application window reparented into the board. Its
-// position is kept in board units so it sticks to the canvas while the viewport
-// pans, but its size stays in screen pixels: zooming the board must not resize
-// the window, otherwise the application reflows its content (text changes size).
+// managedWin is a real application window reparented into the board. The frame
+// (an X container that clips the application) is a board object: like the
+// icons, its position and size live in board units, so it pawns pans and zooms
+// with the canvas. The application itself stays at the pixel size it was
+// opened with and is never resized by the viewport: when the frame shrinks the
+// content is simply clipped by the container, when it grows the extra area
+// shows the container background.
 type managedWin struct {
-	win   C.Window
+	win   C.Window // the real application window
+	cont  C.Window // board-owned container: scaled with the viewport
 	title string
-	bx    float64 // board position of the window's top-left corner
-	by    float64
-	wp    float64 // on-screen size, in pixels: zooming the board must not
-	hp    float64 // resize the window or make the application reflow
+
+	bx float64 // board position of the frame's top-left corner
+	by float64
+	bw float64 // frame size in board units: it scales with the viewport zoom
+	bh float64 // just like the size of every other object on the board
+
+	aw float64 // the application's own size, in screen pixels: zooming the
+	ah float64 // board never resizes it, so apps never reflow their content
+
+	vis *C.Visual // the application's visual, for its render picture
+
+	// Content miniature: the window is redirected by the composite extension,
+	// so its pixels render into a backing pixmap while the real window stays
+	// hidden outside the container's clip. drawWins composites the backing
+	// pixmap scaled into the board pixmap, and the application itself is never
+	// resized: it reflows nothing and keeps its live state.
+	virtual    bool      // the shell draws the window itself, it has no X window
+	widget     bool      // the window holds a widget of the shell
+	widgetKind string    // the kind of the widget: clock, calendar, control…
+	widgetXID  C.ulong   // the window of the toolkit behind it
+	tmb        bool      // true when the frame is smaller than the app (miniature)
+	redir      bool      // the rendering of the app goes into a pixmap
+	float      bool      // the window is not inside the board, it floats over it
+	cpm        C.Pixmap  // the backing pixmap the miniature is drawn from
+	cpic       C.Picture // render picture over the backing pixmap
+	cpw        int       // backing pixmap geometry the picture belongs to
+	cph        int
+
+	dmg C.Damage // damage tracker of the child, to refresh the miniature
+
+	// selfReq holds the sizes of resizes the board asked for but whose
+	// ConfigureNotify echoes have not arrived yet. A stale echo that reports an
+	// old size must not be mistaken for the application resizing itself,
+	// otherwise the frame flaps between sizes while dragging or zooming.
+	selfReq [][2]int
 
 	lastX, lastY, lastW, lastH int
+}
+
+// redirWait remembers a window that is redirected a moment after its
+// adoption: the application has to paint itself first, or the board would
+// keep the content of the screen instead of the content of the application.
+type redirWait struct {
+	win   C.Window
+	until time.Time
 }
 
 // pendingLaunch remembers which top-level window to adopt once a freshly
@@ -151,6 +300,7 @@ type pendingLaunch struct {
 	cx, cy float64 // board point where the window should be centred
 	before map[C.Window]bool
 	until  time.Time
+	n      int // how many companion windows this launch has already adopted
 }
 
 type view struct {
@@ -160,8 +310,16 @@ type view struct {
 	win    C.Window
 	gc     C.GC
 	pm     C.Pixmap
+	dpict  C.Picture // render picture over pm, destination of miniatures
 	visual *C.Visual
 	cmap   C.Colormap
+
+	compOK  bool // the composite extension is present and usable
+	dmgOK   bool // the damage extension notifies about app repaints
+	adopted map[C.Window]bool
+	evTime  C.Time   // last input event timestamp, reused for synthesized ones
+	thumbP  int      // window whose miniature is being pressed, -1 by default
+	kbFocus C.Window // window holding keyboard focus, initially the board
 
 	xftFont *C.XftFont
 	xftDraw *C.XftDraw
@@ -171,22 +329,44 @@ type view struct {
 	ox, oy float64 // board coordinate shown at the viewport's top-left pixel
 	zoom   float64
 
-	root     string // desktop folder, the single source of shortcuts
-	icons    []boardIcon
-	wins     []managedWin
-	pending  *pendingLaunch
-	xkb      []string // keyboard layout names, for the HUD indicator
-	selset   map[int]bool
-	anchor   int // last single-clicked icon, base for Shift+click ranges
-	pressed  int
-	pressX   int
-	pressY   int
-	pressAdd bool
-	lastIdx  int
-	lastTime time.Time
+	root    string // desktop folder, the single source of shortcuts
+	icons   []boardIcon
+	wins    []managedWin
+	pending *pendingLaunch
+	xkb     []string // keyboard layout names, for the HUD indicator
+	cfg     settings
+	keyMap  map[combo]string
+	keyList []keyEntry
+	grabs   []grabRec
 
-	iconDrag bool // moving selected icons
-	orig     map[int][2]float64
+	superDown  bool // the Super key is held down
+	superChord bool // another key was pressed while it was held
+
+	// The state of the touch gestures.
+	touches        map[int]touchPoint
+	touchStart     touchPoint
+	touchStartTime time.Time
+	touchMoved     bool
+	touchPinch     bool
+	touchBaseDist  float64
+	touchBaseMidX  float64
+	touchBaseMidY  float64
+	touchAt        time.Time
+	gesturesOK     bool
+	// The last moment the widgets were fed with the state of the shell.
+	widgetTick time.Time
+	selset     map[int]bool
+	anchor     int // last single-clicked icon, base for Shift+click ranges
+	pressed    int
+	pressX     int
+	pressY     int
+	pressAdd   bool
+	lastIdx    int
+	lastTime   time.Time
+
+	iconDrag   bool // moving selected icons
+	orig       map[int][2]float64
+	dropTarget int // folder the dragged icons are hovering over
 
 	band    bool // rubber-band selection in progress
 	bandX0  int
@@ -219,11 +399,11 @@ type view struct {
 	winResize int // window being scaled by its grip, -1 when none
 	dragSX    int // pointer position, screen pixels, when the drag began
 	dragSY    int
-	dragSW    int // window screen size when the drag began
+	dragSW    int // application size, in pixels, when the resize began
 	dragSH    int
 	dragBX    float64
 	dragBY    float64
-	dragBW    float64 // window screen size when the drag began
+	dragBW    float64 // application size, in pixels, when the resize began
 	dragBH    float64
 
 	redraw   bool
@@ -235,8 +415,43 @@ type view struct {
 	thumbJobs    chan thumbJob
 	thumbDone    chan thumbResult
 	thumbPending map[string]bool
+	gifCache     map[string]*gifAnim
 	thumbImg     *C.XImage // shared staging ZPixmap for thumbnails
 	thumbCap     int       // staging square edge in pixels
+
+	dirEvent chan int // desktop folder changed, wake and reload the icons
+	// The interface of the board itself (the context menu, the prompt) lives
+	// in a window of its own, above the applications: the applications are
+	// real windows and would hide the board otherwise.
+	pop   C.Window
+	popGC C.GC
+	popFt *C.XftDraw // the Xft context of the popup window
+	popX  int        // the place of the popup, in the coordinates of the board
+	popY  int
+	popW  int
+	popH  int
+	// The widgets of the shell: windows of the toolkit on the board.
+	widgetUntil time.Time // the toolkit opens helper windows of its own
+	widgetXID   C.ulong
+	widgetKinds map[C.ulong]string
+	// importDone carries the files copied in from a file manager.
+	importDone chan []string
+	// xdn follows the drag of files over the board.
+	xdn xdndState
+	// redirWait holds the windows that are redirected a moment after their
+	// adoption: the application has to paint itself first.
+	redirWait []redirWait
+	// xds follows the drag of the files of the board over another
+	// application: the board offers them to it.
+	xds xdndSource
+	// The settings application: a window the shell draws itself.
+	set      *settingsApp
+	setWin   *managedWin
+	setOpen  bool
+	setFocus bool
+	// dropBX and dropBY remember where the files were dropped, in board
+	// coordinates, so the new icons can be placed there.
+	dropBX, dropBY float64
 
 	wall      *wallpaper
 	wallGen   int       // bump on every boot so stale frames are dropped
@@ -249,8 +464,19 @@ type view struct {
 	wmDelete C.Atom
 }
 
+// xIgnoreBadAccess installs the error handler that keeps a recoverable
+// protocol error (a key already grabbed by someone else) from killing the
+// session.
+func xIgnoreBadAccess() {
+	C.canvas_ignore_badaccess()
+}
+
 func main() {
 	runtime.LockOSThread()
+
+	// The error handler is installed before anything else: a recoverable
+	// protocol error must not take the whole session down.
+	xIgnoreBadAccess()
 
 	dpy := C.XOpenDisplay(nil)
 	if dpy == nil {
@@ -302,7 +528,7 @@ func main() {
 	}
 
 	C.XSelectInput(dpy, win,
-		C.ExposureMask|C.KeyPressMask|C.ButtonPressMask|C.ButtonReleaseMask|
+		C.ExposureMask|C.KeyPressMask|C.KeyReleaseMask|C.ButtonPressMask|C.ButtonReleaseMask|
 			C.PointerMotionMask|C.StructureNotifyMask|C.SubstructureNotifyMask)
 	// Watch top-level windows so a freshly launched application can be adopted.
 	C.XSelectInput(dpy, root, C.SubstructureNotifyMask)
@@ -310,23 +536,36 @@ func main() {
 	C.XStoreName(dpy, win, C.CString("Board - Go / X11"))
 
 	v := &view{
-		dpy:       dpy,
-		screen:    screen,
-		depth:     C.uint(C.XDefaultDepth(dpy, screen)),
-		win:       win,
-		gc:        C.XCreateGC(dpy, win, 0, nil),
-		visual:    C.XDefaultVisual(dpy, screen),
-		cmap:      C.XDefaultColormap(dpy, screen),
-		zoom:      1,
-		selset:    map[int]bool{},
-		anchor:    -1,
-		pressed:   -1,
-		lastIdx:   -1,
-		winDrag:   -1,
-		winResize: -1,
-		xcolors:   map[color]*C.XftColor{},
-		xkb:       xkbLayouts,
+		dpy:         dpy,
+		screen:      screen,
+		depth:       C.uint(C.XDefaultDepth(dpy, screen)),
+		win:         win,
+		gc:          C.XCreateGC(dpy, win, 0, nil),
+		visual:      C.XDefaultVisual(dpy, screen),
+		cmap:        C.XDefaultColormap(dpy, screen),
+		zoom:        1,
+		selset:      map[int]bool{},
+		anchor:      -1,
+		pressed:     -1,
+		lastIdx:     -1,
+		winDrag:     -1,
+		dropTarget:  -1,
+		winResize:   -1,
+		xcolors:     map[color]*C.XftColor{},
+		xkb:         xkbLayouts,
+		adopted:     map[C.Window]bool{},
+		thumbP:      -1,
+		kbFocus:     win,
+		dirEvent:    make(chan int, 64),
+		widgetKinds: map[C.ulong]string{},
+		cfg:         loadSettings(),
 	}
+	v.rebuildKeyMap()
+	applyStyle(styleByName(v.cfg.Style))
+	v.reopenFont()
+	v.applyCursor()
+	v.xdndInit()
+	v.gesturesInit()
 	v.xftFont = C.XftFontOpenName(dpy, screen, C.CString("sans:size=10"))
 	if v.xftFont == nil {
 		fmt.Fprintln(os.Stderr, "canvas: xft font unavailable, falling back to core text")
@@ -345,6 +584,9 @@ func main() {
 		wakeAtom = C.XInternAtom(wakeDpy, C.CString("CANVAS_WAKE"), C.False)
 	}
 	v.startThumbWorkers()
+	startAnimTicker()
+	startWidgetTicker()
+	v.initToolkit()
 
 	v.wmDelete = C.XInternAtom(dpy, C.CString("WM_DELETE_WINDOW"), C.False)
 	proto := []C.Atom{v.wmDelete}
@@ -354,20 +596,34 @@ func main() {
 	C.XGetWindowAttributes(dpy, win, &geom)
 	v.resize(int(geom.width), int(geom.height))
 
+	// Miniatures of managed windows are drawn by the composite extension; the
+	// damage extension tells the board when an application redraws and the
+	// board must refresh its miniature.
+	v.bootComposite()
+
 	v.root = os.Getenv("CANVAS_DIR")
 	if v.root == "" {
 		v.root = desktopDir()
 	}
 	v.reload(true)
+	// The pages of the widgets live in a folder of the desktop, so the user
+	// can change them.
+	ensureWidgetFolder()
+	go watchDir(v.root, v.dirEvent)
 
 	C.XMapWindow(dpy, win)
 	C.XFlush(dpy)
+	// A bare X server has nowhere else to send keyboard input; take the input
+	// focus so the board's shortcuts work right after startup.
+	C.XSetInputFocus(dpy, win, C.PointerRoot, C.CurrentTime)
+	C.XFlush(dpy)
 
-	v.grabSwitcher()
+	v.regrabKeys()
 	v.loadWallpaper()
 
 	fmt.Printf("board: showing %s\n", v.root)
 	fmt.Println("  dbl-click   open in a real application window")
+	fmt.Println("  super      back to the centre of the board")
 	fmt.Println("  t / super+r terminal   drag pan   wheel zoom at pointer")
 	fmt.Println("  shift+wheel pan left/right      ctrl+wheel  pan up/down")
 	fmt.Println("  arrows      pan        + / -       zoom")
@@ -375,6 +631,7 @@ func main() {
 	fmt.Println("  ctrl+r      restart the board")
 	fmt.Println("  window: drag its title to move, drag the blue grip to scale, click it to raise, × closes")
 	fmt.Println("  shift+tab switches between open windows, alt+f4 closes the active one")
+	fmt.Println("  drop a file on a folder to move it inside")
 	if session {
 		fmt.Printf("session: Canvas desktop, apps=%q\n", os.Getenv("CANVAS_SESSION_APPS"))
 		v.startSession()
@@ -382,6 +639,13 @@ func main() {
 
 	v.paint()
 	v.blit()
+	if os.Getenv("CANVAS_DEBUG_ICONS") == "1" {
+		for i, ic := range v.icons {
+			fmt.Printf("icon %d %q at %d,%d size %d,%d\n", i, ic.name,
+				v.sx(ic.x)+int(ic.w*v.zoom/2), v.sy(ic.y)+int(ic.h*v.zoom/2),
+				int(ic.w*v.zoom), int(ic.h*v.zoom))
+		}
+	}
 	v.run()
 }
 
@@ -399,6 +663,9 @@ func (v *view) run() {
 			C.XNextEvent(v.dpy, &xev)
 		}
 		v.drainBackground()
+		v.pumpToolkit()
+		v.tickWidgets()
+		v.doRedirs()
 		switch {
 		case v.redraw:
 			v.paint()
@@ -408,6 +675,50 @@ func (v *view) run() {
 		}
 		v.redraw, v.needBlit = false, false
 	}
+}
+
+// doRedirs redirects the applications that have had the time to paint
+// themselves.
+func (v *view) doRedirs() {
+	if len(v.redirWait) == 0 {
+		return
+	}
+	now := time.Now()
+	kept := v.redirWait[:0]
+	for _, r := range v.redirWait {
+		if now.Before(r.until) {
+			kept = append(kept, r)
+			continue
+		}
+		v.redirectNow(r.win)
+	}
+	v.redirWait = kept
+}
+
+// redirPainted is called when an application has painted itself: its window
+// can be redirected now.
+func (v *view) redirPainted(d C.Drawable) {
+	for i, r := range v.redirWait {
+		if C.Drawable(r.win) == d {
+			v.redirWait = append(v.redirWait[:i], v.redirWait[i+1:]...)
+			v.redirectNow(r.win)
+			return
+		}
+	}
+}
+
+// redirectNow redirects a window and hands its content to the board.
+func (v *view) redirectNow(win C.Window) {
+	if C.canvas_redirect(v.dpy, win) == 0 {
+		return
+	}
+	for i := range v.wins {
+		if v.wins[i].win == win {
+			v.wins[i].redir = true
+		}
+	}
+	v.placeWindows()
+	v.redraw = true
 }
 
 func (v *view) handle(xev *C.XEvent) {
@@ -428,13 +739,58 @@ func (v *view) handle(xev *C.XEvent) {
 			v.redraw = true
 		}
 	case C.ButtonPress:
-		v.onPress((*C.XButtonEvent)(unsafe.Pointer(xev)))
+		be := (*C.XButtonEvent)(unsafe.Pointer(xev))
+		v.evTime = be.time
+		if be.window == v.pop {
+			b := *be
+			px, py := v.popPoint(int(be.x), int(be.y))
+			b.x, b.y = C.int(px), C.int(py)
+			v.onPress(&b)
+			return
+		}
+		v.onPress(be)
 	case C.ButtonRelease:
-		v.onRelease((*C.XButtonEvent)(unsafe.Pointer(xev)))
+		be := (*C.XButtonEvent)(unsafe.Pointer(xev))
+		v.evTime = be.time
+		if be.window == v.pop {
+			b := *be
+			px, py := v.popPoint(int(be.x), int(be.y))
+			b.x, b.y = C.int(px), C.int(py)
+			v.onRelease(&b)
+			return
+		}
+		v.onRelease(be)
 	case C.MotionNotify:
-		v.onMotion((*C.XMotionEvent)(unsafe.Pointer(xev)))
+		me := (*C.XMotionEvent)(unsafe.Pointer(xev))
+		v.evTime = me.time
+		if me.window == v.pop {
+			m := *me
+			px, py := v.popPoint(int(me.x), int(me.y))
+			m.x, m.y = C.int(px), C.int(py)
+			v.onMotion(&m)
+			return
+		}
+		v.onMotion(me)
 	case C.KeyPress:
-		v.onKey((*C.XKeyEvent)(unsafe.Pointer(xev)))
+		ke := (*C.XKeyEvent)(unsafe.Pointer(xev))
+		v.evTime = ke.time
+		if ke.window == v.pop {
+			k := *ke
+			k.window = v.win
+			v.onKey(&k)
+			return
+		}
+		v.onKey(ke)
+	case C.KeyRelease:
+		v.onKeyRelease((*C.XKeyEvent)(unsafe.Pointer(xev)))
+	case C.XDamageNotify:
+		// The application repainted itself: refresh its miniature.
+		v.redraw = true
+		// A window that paints itself for the first time can be redirected
+		// now: the board would keep the content of the screen otherwise.
+		if de, ok := (*C.XDamageNotifyEvent)(unsafe.Pointer(xev)), true; ok {
+			v.redirPainted(C.Drawable(de.drawable))
+		}
 	case C.MapNotify:
 		me := (*C.XMapEvent)(unsafe.Pointer(xev))
 		v.onMap(me.window)
@@ -455,11 +811,31 @@ func (v *view) handle(xev *C.XEvent) {
 			// A background worker queued results; run() drains the channels.
 			v.redraw = true
 		}
+		if ce.message_type == atomXdndEnter ||
+			ce.message_type == atomXdndPosition ||
+			ce.message_type == atomXdndLeave ||
+			ce.message_type == atomXdndDrop {
+			v.onXDND(ce)
+		}
+	case C.SelectionNotify:
+		v.onSelectionNotify((*C.XSelectionEvent)(unsafe.Pointer(xev)))
+	case C.SelectionRequest:
+		// An application asks for the files the board drags.
+		v.onSelectionRequest((*C.XSelectionRequestEvent)(unsafe.Pointer(xev)))
+	case C.GenericEvent:
+		v.onXIEvent(xev)
 	}
 }
 
 func (v *view) onPress(be *C.XButtonEvent) {
 	x, y := int(be.x), int(be.y)
+
+	// A screen that emulates the clicks sends a button event for every
+	// touch. The touch gestures already handle the fingers, so these events
+	// are dropped.
+	if v.gesturesOK && !v.touchAt.IsZero() && time.Since(v.touchAt) < 120*time.Millisecond {
+		return
+	}
 
 	if v.promptOn {
 		return
@@ -480,8 +856,51 @@ func (v *view) onPress(be *C.XButtonEvent) {
 		return
 	}
 
+	// A press on a miniature belongs to the application it previews, not to
+	// the board: raise it, give it the keyboard and re-send the click at the
+	// matching point of the real window behind the miniature.
+	if be.button == 1 || be.button == 4 || be.button == 5 {
+		if t := v.contentWinAt(x, y); t >= 0 {
+			w := &v.wins[t]
+			lx, ly := v.thumbLocal(w, x, y)
+			if v.kbFocus != w.win {
+				v.kbFocus = w.win
+				C.XSetInputFocus(v.dpy, w.win, C.PointerRoot, C.CurrentTime)
+			}
+			v.raiseWindow(w.win)
+			switch be.button {
+			case 1:
+				C.XGrabPointer(v.dpy, v.win, C.False,
+					C.ButtonPressMask|C.ButtonReleaseMask|C.PointerMotionMask,
+					C.GrabModeAsync, C.GrabModeAsync, 0, 0, C.CurrentTime)
+				v.thumbP = t
+				v.synthButton(w, int(be.button), true, lx, ly,
+					int(be.x_root), int(be.y_root), uint(be.state))
+			default:
+				v.synthButton(w, int(be.button), true, lx, ly,
+					int(be.x_root), int(be.y_root), uint(be.state))
+			}
+			return
+		}
+	}
+	// A press outside every miniature returns keyboard focus to the board.
+	if v.kbFocus != v.win {
+		v.kbFocus = v.win
+		C.XSetInputFocus(v.dpy, v.win, C.PointerRoot, C.CurrentTime)
+	}
+
 	switch be.button {
 	case 1:
+		if v.setOpen && v.setWin != nil {
+			x0, y0, sw, sh := v.winRect(v.setWin)
+			if x >= x0 && x < x0+sw && y >= y0 && y < y0+sh {
+				v.setFocus = true
+				v.settingsClick(x, y)
+				v.redraw = true
+				return
+			}
+			v.setFocus = false
+		}
 		C.XGrabPointer(v.dpy, v.win, C.False,
 			C.ButtonPressMask|C.ButtonReleaseMask|C.PointerMotionMask,
 			C.GrabModeAsync, C.GrabModeAsync, 0, 0, C.CurrentTime)
@@ -545,29 +964,52 @@ func (v *view) onPress(be *C.XButtonEvent) {
 	case 3:
 		v.openMenu(x, y)
 	case 4:
+		if v.setOpen && v.setWin != nil {
+			if _, _, ok := v.settingsPoint(x, y); ok {
+				v.settingsScroll(-1)
+				return
+			}
+		}
 		switch {
 		case be.state&C.ShiftMask != 0:
-			v.ox -= panWheel / v.zoom
+			v.ox -= panWheel * v.wheelSpeed() / v.zoom
 		case be.state&C.ControlMask != 0:
-			v.oy -= panWheel / v.zoom
+			v.oy -= panWheel * v.wheelSpeed() / v.zoom
 		default:
-			v.zoomAt(float64(x), float64(y), zWheel)
+			v.zoomWheel(x, y, 1)
 		}
 		v.redraw = true
 	case 5:
+		if v.setOpen && v.setWin != nil {
+			if _, _, ok := v.settingsPoint(x, y); ok {
+				v.settingsScroll(1)
+				return
+			}
+		}
 		switch {
 		case be.state&C.ShiftMask != 0:
-			v.ox += panWheel / v.zoom
+			v.ox += panWheel * v.wheelSpeed() / v.zoom
 		case be.state&C.ControlMask != 0:
-			v.oy += panWheel / v.zoom
+			v.oy += panWheel * v.wheelSpeed() / v.zoom
 		default:
-			v.zoomAt(float64(x), float64(y), 1/zWheel)
+			v.zoomWheel(x, y, -1)
 		}
 		v.redraw = true
 	}
 }
 
 func (v *view) onRelease(be *C.XButtonEvent) {
+	if v.thumbP >= 0 {
+		if be.button == 1 {
+			w := &v.wins[v.thumbP]
+			lx, ly := v.thumbLocal(w, int(be.x), int(be.y))
+			v.synthButton(w, 1, false, lx, ly, int(be.x_root), int(be.y_root),
+				uint(be.state))
+			v.thumbP = -1
+			C.XUngrabPointer(v.dpy, C.CurrentTime)
+		}
+		return
+	}
 	if be.button != 1 && be.button != 2 {
 		return
 	}
@@ -635,6 +1077,9 @@ func (v *view) applyBand() {
 }
 
 func (v *view) beginIconDrag() {
+	if os.Getenv("CANVAS_DEBUG_DND") == "1" {
+		fmt.Printf("dnd: drag begin at %d,%d\n", v.pressX, v.pressY)
+	}
 	if !v.selset[v.pressed] {
 		v.selset = map[int]bool{v.pressed: true}
 		v.anchor = v.pressed
@@ -649,12 +1094,43 @@ func (v *view) beginIconDrag() {
 	v.dragBX = v.ox + float64(v.pressX)/v.zoom
 	v.dragBY = v.oy + float64(v.pressY)/v.zoom
 	v.pressed = -1
+	// The board offers the dragged files to the application under the
+	// pointer: another file manager may take them.
+	var paths []string
+	for i := range v.selset {
+		if i >= 0 && i < len(v.icons) {
+			paths = append(paths, v.icons[i].path)
+		}
+	}
+	v.xdndStart(paths)
 }
 
 func (v *view) endIconDrag() {
 	v.iconDrag = false
 	v.orig = nil
 	C.XUngrabPointer(v.dpy, C.CurrentTime)
+	target := v.dropTarget
+	v.dropTarget = -1
+	if os.Getenv("CANVAS_DEBUG_DND") == "1" {
+		fmt.Printf("dnd: drag end, target %d\n", target)
+	}
+	if target >= 0 {
+		// The icons were dropped on a folder: they move inside it.
+		v.xdndStop()
+		v.dropIntoFolder(target)
+		return
+	}
+	// Another application may have taken the files: the board offers them.
+	var rx, ry C.int
+	C.XQueryPointer(v.dpy, C.XDefaultRootWindow(v.dpy), nil, nil,
+		&rx, &ry, nil, nil, nil)
+	v.xdndRelease(int(rx), int(ry))
+	if v.xds.active {
+		// The target asks for the files: the board keeps the selection
+		// until the target is done with it.
+		v.redraw = true
+		return
+	}
 	savePositions(v.root, v.icons)
 	v.redraw = true
 }
@@ -682,6 +1158,35 @@ func (v *view) onMotion(me *C.XMotionEvent) {
 		return
 	}
 
+	// While a miniature is pressed, the motion feeds the application behind
+	// it (drag-select, hover), translated to the real window coordinates.
+	if v.thumbP >= 0 {
+		w := &v.wins[v.thumbP]
+		if me.state&C.Button1Mask == 0 {
+			lx, ly := v.thumbLocal(w, x, y)
+			v.synthButton(w, 1, false, lx, ly, int(me.x_root), int(me.y_root),
+				uint(me.state))
+			v.thumbP = -1
+			C.XUngrabPointer(v.dpy, C.CurrentTime)
+			return
+		}
+		lx, ly := v.thumbLocal(w, x, y)
+		v.synthMotion(w, lx, ly, int(me.x_root), int(me.y_root),
+			uint(me.state)|C.Button1Mask)
+		return
+	}
+
+	// Hovering over a miniature previews itself to the application, so hover
+	// effects and tooltips keep working while zoomed out.
+	if v.winDrag < 0 && v.winResize < 0 && !v.iconDrag && !v.band && !v.dragging {
+		if t := v.contentWinAt(x, y); t >= 0 {
+			w := &v.wins[t]
+			lx, ly := v.thumbLocal(w, x, y)
+			v.synthMotion(w, lx, ly, int(me.x_root), int(me.y_root), uint(me.state))
+			return
+		}
+	}
+
 	// Dragging a window's title moves it; dragging its grip scales it.
 	if v.winDrag >= 0 || v.winResize >= 0 {
 		if me.state&C.Button1Mask == 0 && me.state&C.Button2Mask == 0 {
@@ -704,8 +1209,18 @@ func (v *view) onMotion(me *C.XMotionEvent) {
 			if s > 8 {
 				s = 8
 			}
-			w.wp, w.hp = v.dragBW*s, v.dragBH*s
-			v.clampWin(w)
+			// The grip resizes the application itself; the frame follows it,
+			// pinned to cover the new size at the current zoom. The frame is
+			// only clamped back into the viewport when the drag ends: reguing
+			// the position on every motion would make the title bar jump.
+			w.aw, w.ah = v.dragBW*s, v.dragBH*s
+			aw, ah := int(math.Round(w.aw)), int(math.Round(w.ah))
+			w.bw, w.bh = w.aw, w.ah
+			w.selfReq = append(w.selfReq, [2]int{aw, ah})
+			if len(w.selfReq) > 8 {
+				w.selfReq = w.selfReq[1:]
+			}
+			C.XMoveResizeWindow(v.dpy, w.win, 0, 0, C.uint(aw), C.uint(ah))
 		}
 		v.placeWindows()
 		v.redraw = true
@@ -729,12 +1244,24 @@ func (v *view) onMotion(me *C.XMotionEvent) {
 			v.icons[i].x = o[0] + dx
 			v.icons[i].y = o[1] + dy
 		}
+		// The folder under the pointer is the target of the drop.
+		if t := v.folderAt(x, y); t != v.dropTarget {
+			v.dropTarget = t
+		}
+		// Another application may take the files: the board offers them.
+		v.xdndMove(int(me.x_root), int(me.y_root))
 		v.redraw = true
 		return
 	}
 	if v.band {
 		v.bandX1, v.bandY1 = x, y
 		v.redraw = true
+		return
+	}
+	if v.set != nil && v.set.drag >= 0 {
+		if ux, _, ok := v.settingsPoint(x, y); ok {
+			v.settingsSlider(ux)
+		}
 		return
 	}
 	if !v.dragging {
@@ -754,6 +1281,9 @@ func (v *view) onMotion(me *C.XMotionEvent) {
 
 func (v *view) onKey(ke *C.XKeyEvent) {
 	ks := C.XLookupKeysym(ke, 0)
+	if os.Getenv("CANVAS_DEBUG_KEYS") == "1" {
+		fmt.Printf("key: state=0x%x keysym=0x%x\n", ke.state, uint(ks))
+	}
 	if v.promptOn {
 		v.promptKey(ke, ks)
 		return
@@ -776,86 +1306,124 @@ func (v *view) onKey(ke *C.XKeyEvent) {
 		v.redraw = true
 		return
 	}
-	shift := ke.state&C.ShiftMask != 0
-	if ke.state&C.ControlMask != 0 {
-		switch ks {
-		case 'c', 'C':
-			v.copySelection()
-			return
-		case 'x', 'X':
-			v.cutSelection()
-			return
-		case 'v', 'V':
-			v.paste()
-			return
-		}
+
+	// The settings window takes the keyboard while it is focused.
+	if v.setFocus && v.setOpen && C.Window(ke.window) == v.win {
+		v.settingsKey(ke)
+		return
 	}
-	if ks == 'r' || ks == 'R' {
-		if ke.state&C.Mod4Mask != 0 { // Super+R: open a terminal (kitty first)
-			v.launchTerminal()
-			v.redraw = true
-			return
-		}
-		if ke.state&C.ControlMask != 0 { // Ctrl+R: restart the board in place
-			v.restart()
-			return
-		}
+
+	// Super alone is the "back to the centre" gesture of the board. The press
+	// is only remembered here: the board centres when the key is released
+	// without a chord, so that Super+R still opens a terminal without moving
+	// the board first.
+	if uint(ks) == ksSuperL || uint(ks) == ksSuperR {
+		v.superDown = true
+		v.superChord = false
+		return
 	}
-	cx, cy := float64(v.w)/2, float64(v.h)/2
-	switch ks {
-	case 0xff1b: // Escape clears the selection, or leaves the board if empty
-		if len(v.selset) > 0 {
-			v.selset = map[int]bool{}
-			v.anchor = -1
-			break
+	if v.superDown {
+		v.superChord = true
+	}
+
+	mods := uint32(ke.state) & (maskShift | maskControl | maskMod1 | maskMod4 | maskMod5)
+	action := v.actionFor(uint32(ks), mods)
+	if action == "" {
+		return
+	}
+	v.runAction(action, mods)
+}
+
+// onKeyRelease reacts to a key being let go. Releasing Super without a chord
+// brings the board back to its centre.
+func (v *view) onKeyRelease(ke *C.XKeyEvent) {
+	ks := uint32(C.XLookupKeysym(ke, 0))
+	if os.Getenv("CANVAS_DEBUG_KEYS") == "1" {
+		fmt.Printf("key up: state=0x%x keysym=0x%x\n", ke.state, uint(ks))
+	}
+	if ks != ksSuperL && ks != ksSuperR {
+		return
+	}
+	if !v.superDown {
+		return
+	}
+	chord := v.superChord
+	v.superDown = false
+	v.superChord = false
+	if chord {
+		return
+	}
+	if v.actionFor(ks, 0) == actCenter {
+		if os.Getenv("CANVAS_DEBUG_KEYS") == "1" {
+			fmt.Println("action: center")
 		}
-		C.XCloseDisplay(v.dpy)
-		os.Exit(0)
-	case 'q':
-		C.XCloseDisplay(v.dpy)
-		os.Exit(0)
-	case 0xffff: // Delete: move the selection to the trash
-		v.deleteSelection()
-	case 0xffbf: // F2: rename
-		v.renameSelection()
-	case 0xff50: // Home
 		v.centerOrigin()
-	case 'r', 'R':
-		if shift {
-			v.reload(false)
-		} else {
-			v.centerOrigin()
-		}
-	case 0xffc2: // F5
-		v.reload(false)
-	case 'f':
-		v.fit()
-	case 't':
+		v.redraw = true
+	}
+}
+
+// runAction performs the action a key combination is bound to.
+func (v *view) runAction(action string, mods uint32) {
+	cx, cy := float64(v.w)/2, float64(v.h)/2
+	speed := v.cfg.Mouse.PanSpeed
+	if speed <= 0 {
+		speed = 1
+	}
+	switch action {
+	case actCenter:
+		v.centerOrigin()
+	case actTerminal:
 		v.launchTerminal()
-	case '0':
+	case actSettings:
+		v.openSettings()
+	case actWidgets:
+		v.openWidgetPicker()
+	case actFit:
+		v.fit()
+	case actReload:
+		v.reload(false)
+	case actRestart:
+		v.restart()
+	case actZoom100:
 		v.zoomAt(cx, cy, 1/v.zoom)
-	case 0xff51: // Left
-		v.ox -= panKey / v.zoom
-	case 0xff53: // Right
-		v.ox += panKey / v.zoom
-	case 0xff52: // Up
-		v.oy -= panKey / v.zoom
-	case 0xff54: // Down
-		v.oy += panKey / v.zoom
-	case 0xff55: // Page Up
+	case actZoomIn:
+		v.zoomAt(cx, cy, math.Pow(zKey, v.zoomSpeed()))
+	case actZoomOut:
+		v.zoomAt(cx, cy, math.Pow(zKey, -v.zoomSpeed()))
+	case actQuit:
+		C.XCloseDisplay(v.dpy)
+		os.Exit(0)
+	case actSwitch:
+		v.cycleWindows(mods&maskShift != 0)
+	case actClose:
+		v.closeActive()
+	case actDelete:
+		v.deleteSelection()
+	case actRename:
+		v.renameSelection()
+	case actCopy:
+		v.copySelection()
+	case actCut:
+		v.cutSelection()
+	case actPaste:
+		v.paste()
+	case actPanLeft:
+		v.ox -= panKey * speed / v.zoom
+	case actPanRight:
+		v.ox += panKey * speed / v.zoom
+	case actPanUp:
+		v.oy -= panKey * speed / v.zoom
+	case actPanDown:
+		v.oy += panKey * speed / v.zoom
+	case actPageUp:
 		v.oy -= float64(v.h) / v.zoom
-	case 0xff56: // Page Down
+	case actPageDown:
 		v.oy += float64(v.h) / v.zoom
-	case '+', '=':
-		v.zoomAt(cx, cy, zKey)
-	case '-', '_':
-		v.zoomAt(cx, cy, 1/zKey)
-	case 0xff09, 0xfe20: // Tab / Shift+Tab: switch between open windows
-		v.cycleWindows(shift)
-	case 0xffc1: // F4 with Alt: close the active window
-		if ke.state&C.Mod1Mask != 0 {
-			v.closeActive()
-		}
+	case actEscape:
+		// Escape only clears the selection: the board is never left by
+		// accident. The key q closes it.
+		v.selset = map[int]bool{}
+		v.anchor = -1
 	default:
 		return
 	}
@@ -899,6 +1467,10 @@ func (v *view) openMenu(x, y int) {
 			items = append(items, menuItem{label: "Вставить", do: v.paste})
 		}
 		items = append(items, menuItem{label: "Открыть терминал", do: v.launchTerminal})
+		items = append(items, menuItem{sep: true})
+		items = append(items, menuItem{label: "Файловый менеджер", do: v.openFileManager})
+		items = append(items, menuItem{label: "Параметры", do: v.openSettings})
+		items = append(items, menuItem{label: "Виджеты", do: v.openWidgetPicker})
 		items = append(items, menuItem{sep: true})
 		items = append(items, menuItem{label: "Обновить", do: func() { v.reload(false) }})
 		if v.wall != nil {
@@ -999,28 +1571,136 @@ func (v *view) moveMenu(dir int) {
 	}
 }
 
+// boardOrigin returns the place of the board on the screen.
+func (v *view) boardOrigin() (int, int) {
+	var rx, ry C.int
+	var child C.Window
+	C.XTranslateCoordinates(v.dpy, C.XDefaultRootWindow(v.dpy), v.win,
+		0, 0, &rx, &ry, &child)
+	return int(rx), int(ry)
+}
+
+// openPopup raises the window of the interface of the board and gives it the
+// size of the piece of interface it has to hold. The window is a child of the
+// root, so it lies above every application on the board.
+func (v *view) openPopup(x, y, w, h int, c color) {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	bx, by := v.boardOrigin()
+	if v.pop == 0 {
+		v.pop = C.XCreateSimpleWindow(v.dpy, C.XDefaultRootWindow(v.dpy),
+			C.int(bx+x), C.int(by+y), C.uint(w), C.uint(h), 0, 0,
+			C.ulong(pixel(c)))
+		v.popGC = C.XCreateGC(v.dpy, v.pop, 0, nil)
+		v.popFt = C.XftDrawCreate(v.dpy, C.Drawable(v.pop), v.visual, v.cmap)
+		C.XSelectInput(v.dpy, v.pop, C.ExposureMask|C.ButtonPressMask|
+			C.ButtonReleaseMask|C.PointerMotionMask|C.KeyPressMask)
+	} else {
+		if w != v.popW || h != v.popH {
+			C.XResizeWindow(v.dpy, v.pop, C.uint(w), C.uint(h))
+		}
+		if x != v.popX || y != v.popY {
+			C.XMoveWindow(v.dpy, v.pop, C.int(bx+x), C.int(by+y))
+		}
+	}
+	v.popX, v.popY, v.popW, v.popH = x, y, w, h
+	C.XRaiseWindow(v.dpy, v.pop)
+	C.XMapWindow(v.dpy, v.pop)
+	C.XFlush(v.dpy)
+}
+
+// closePopup hides the window of the interface of the board.
+func (v *view) closePopup() {
+	if v.pop == 0 {
+		return
+	}
+	C.XUnmapWindow(v.dpy, v.pop)
+	C.XFlush(v.dpy)
+}
+
+// popFill fills a rectangle of the window of the interface of the board.
+func (v *view) popFill(x, y, w, h int, c color) {
+	if v.pop == 0 {
+		return
+	}
+	C.XSetForeground(v.dpy, v.popGC, C.ulong(pixel(c)))
+	C.XFillRectangle(v.dpy, v.pop, v.popGC, C.int(x), C.int(y),
+		C.uint(w), C.uint(h))
+}
+
+// popLine draws a line in the window of the interface of the board.
+func (v *view) popLine(c color, x0, y0, x1, y1 int) {
+	if v.pop == 0 {
+		return
+	}
+	C.XSetForeground(v.dpy, v.popGC, C.ulong(pixel(c)))
+	C.XDrawLine(v.dpy, v.pop, v.popGC, C.int(x0), C.int(y0), C.int(x1), C.int(y1))
+}
+
+// popRect draws the frame of a rectangle in the window of the interface of
+// the board.
+func (v *view) popRect(c color, x, y, w, h int) {
+	v.popLine(c, x, y, x+w, y)
+	v.popLine(c, x, y+h, x+w, y+h)
+	v.popLine(c, x, y, x, y+h)
+	v.popLine(c, x+w, y, x+w, y+h)
+}
+
+// popText writes a line of text in the window of the interface of the board.
+func (v *view) popText(x, y int, s string, c color) {
+	if v.popFt == nil || v.xftFont == nil {
+		return
+	}
+	xc := v.xftColor(c)
+	if xc == nil {
+		return
+	}
+	cs := C.CString(s)
+	C.XftDrawStringUtf8(v.popFt, xc, v.xftFont, C.int(x), C.int(y),
+		(*C.FcChar8)(unsafe.Pointer(cs)), C.int(len(s)))
+	C.free(unsafe.Pointer(cs))
+}
+
+// popPoint turns the place of an event of the popup into the place of the
+// same event in the coordinates of the board.
+func (v *view) popPoint(x, y int) (int, int) {
+	bx, by := v.boardOrigin()
+	return x + v.popX - bx, y + v.popY - by
+}
+
+// raisePopup puts the window of the interface of the board above the
+// applications: the board raises the floating windows every frame.
+func (v *view) raisePopup() {
+	if v.pop == 0 {
+		return
+	}
+	C.XRaiseWindow(v.dpy, v.pop)
+}
+
 func (v *view) drawMenu() {
 	if !v.menuOpen {
+		v.closePopup()
 		return
 	}
 	x, y, w, h := v.menuGeom()
-	v.fill(x, y, w, h, menuBg)
-	v.fg(menuBorder)
-	C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(x), C.int(y),
-		C.uint(w-1), C.uint(h-1))
-	cy := y + 3
+	v.openPopup(x, y, w, h, menuBg)
+	v.popFill(0, 0, w, h, menuBg)
+	v.popRect(menuBorder, 0, 0, w-1, h-1)
+	cy := 3
 	for i, it := range v.menu {
 		if it.sep {
-			v.fg(menuBorder)
-			C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x+10), C.int(cy+menuSep/2),
-				C.int(x+w-10), C.int(cy+menuSep/2))
+			v.popLine(menuBorder, 10, cy+menuSep/2, w-10, cy+menuSep/2)
 			cy += menuSep
 			continue
 		}
 		if i == v.menuHover {
-			v.fill(x+2, cy, w-4, menuRow, selBg)
+			v.popFill(2, cy, w-4, menuRow, selBg)
 		}
-		v.text(x+16, cy+16, it.label, textCol)
+		v.popText(16, cy+16, it.label, textCol)
 		cy += menuRow
 	}
 }
@@ -1093,21 +1773,17 @@ func (v *view) drawPrompt() {
 	}
 	x := (v.w - w) / 2
 	y := (v.h - h) / 2
-	v.fill(x, y, w, h, menuBg)
-	v.fg(menuBorder)
-	C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(x), C.int(y),
-		C.uint(w-1), C.uint(h-1))
-	v.text(x+18, y+28, v.promptTitle, textCol)
-	ix, iy, iw, ih := x+18, y+44, w-36, 30
-	v.fill(ix, iy, iw, ih, panelBg)
-	v.fg(selBorder)
-	C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(ix), C.int(iy),
-		C.uint(iw-1), C.uint(ih-1))
-	v.text(ix+8, iy+20, v.promptText, textCol)
+	v.openPopup(x, y, w, h, menuBg)
+	v.popFill(0, 0, w, h, menuBg)
+	v.popRect(menuBorder, 0, 0, w-1, h-1)
+	v.popText(18, 28, v.promptTitle, textCol)
+	ix, iy, iw, ih := 18, 44, w-36, 30
+	v.popFill(ix, iy, iw, ih, panelBg)
+	v.popRect(selBorder, ix, iy, iw-1, ih-1)
+	v.popText(ix+8, iy+20, v.promptText, textCol)
 	cx := ix + 8 + v.textWidth(v.promptText) + 1
-	v.fg(textCol)
-	C.XDrawLine(v.dpy, v.pm, v.gc, C.int(cx), C.int(iy+6), C.int(cx), C.int(iy+ih-6))
-	v.text(x+18, y+h-16, "Enter — OK, Esc — отмена", hudCol)
+	v.popLine(textCol, cx, iy+6, cx, iy+ih-6)
+	v.popText(18, h-16, "Enter — OK, Esc — отмена", hudCol)
 }
 
 func (v *view) drawBand() {
@@ -1559,6 +2235,10 @@ func (v *view) openIcon(i int) {
 		return
 	}
 	ic := v.icons[i]
+	if ic.path == settingsPathMarker {
+		v.openSettings()
+		return
+	}
 	if ic.isApp {
 		v.launchDesktop(ic.path, ic.x+ic.w/2, ic.y+ic.h/2)
 		return
@@ -1603,6 +2283,10 @@ func (v *view) reload(reset bool) {
 		sort.SliceStable(s, func(i, j int) bool {
 			return strings.ToLower(s[i].label) < strings.ToLower(s[j].label)
 		})
+	}
+	// The settings application is always on the desktop.
+	if ic, ok := settingsIcon(); ok {
+		apps = append(apps, ic)
 	}
 	less(dirs)
 	less(files)
@@ -1784,6 +2468,18 @@ func (v *view) launchTerminal() {
 	v.spawn(argv, cx, cy)
 }
 
+// openFileManager opens the file manager of the shell on the desktop.
+func (v *view) openFileManager() {
+	cx := v.ox + float64(v.w)/(2*v.zoom)
+	cy := v.oy + float64(v.h)/(2*v.zoom)
+	argv := filemanCommand(v.root)
+	if argv == nil {
+		v.setStatus("Файловый менеджер не установлен")
+		return
+	}
+	v.spawn(argv, cx, cy)
+}
+
 // terminalCommand picks the first terminal emulator present on the system.
 func terminalCommand() []string {
 	for _, n := range []string{"kitty", "foot", "alacritty", "xterm", "konsole", "xfce4-terminal"} {
@@ -1857,12 +2553,34 @@ func (v *view) restart() {
 	os.Exit(0)
 }
 
+// filemanCommand returns the command of the file manager of the shell, or
+// nothing when it is not installed.
+func filemanCommand(dir string) []string {
+	names := []string{"canvas-fileman", "fileman"}
+	if exe, err := os.Executable(); err == nil {
+		home := filepath.Dir(exe)
+		names = append([]string{filepath.Join(home, "fileman"),
+			filepath.Join(home, "canvas-fileman")}, names...)
+	}
+	for _, n := range names {
+		if p, err := exec.LookPath(n); err == nil {
+			return []string{p, dir}
+		}
+	}
+	return nil
+}
+
 // appCommand prefers a real file manager for folders; CANVAS_FILEMANAGER can
 // override it (useful for testing without a desktop session).
 func appCommand(target string, isDir bool) []string {
 	if isDir {
 		if fm := os.Getenv("CANVAS_FILEMANAGER"); fm != "" {
 			return append(strings.Fields(fm), target)
+		}
+		// The file manager of the shell comes first: it lives on the board
+		// like every other application.
+		if cmd := filemanCommand(target); cmd != nil {
+			return cmd
 		}
 		for _, n := range []string{"dolphin", "thunar", "nautilus", "pcmanfm", "nemo"} {
 			if p, err := exec.LookPath(n); err == nil {
@@ -1957,12 +2675,36 @@ func (v *view) rootChildren() map[C.Window]bool {
 }
 
 func (v *view) onMap(win C.Window) {
-	p := v.pending
-	if p == nil || win == v.win || p.before[win] || time.Now().After(p.until) {
+	if win == v.win || v.adopted[win] {
 		return
 	}
-	v.pending = nil
-	v.adopt(win, p.cx, p.cy)
+	// Skip the board's own containers and managed children: their maps are
+	// echoed by the SubstructureNotifyMask selection.
+	for i := range v.wins {
+		if v.wins[i].cont == win || v.wins[i].win == win {
+			return
+		}
+	}
+	// The toolkit of the widgets opens helper windows of its own: they are
+	// not applications and must not be adopted.
+	if !time.Now().After(v.widgetUntil) {
+		return
+	}
+	p := v.pending
+	if p != nil && p.before[win] {
+		return
+	}
+	cx := v.ox + float64(v.w)/(2*v.zoom)
+	cy := v.oy + float64(v.h)/(2*v.zoom)
+	if p != nil && !time.Now().After(p.until) {
+		cx, cy = p.cx, p.cy
+		// A launch can open several windows (main window plus dialogs); with no
+		// window manager they would otherwise pile up unmanaged and unclose at
+		// all, so each companion is pinned right under the previous one.
+		cy += float64(p.n) * 60
+		p.n++
+	}
+	v.adopt(win, cx, cy)
 }
 
 // maxWinSize is the largest on-screen size a managed window may take. It is
@@ -1971,7 +2713,7 @@ func (v *view) onMap(win C.Window) {
 // hide its own title bar and the close button, leaving no free board to pan on.
 func (v *view) maxWinSize() (w, h float64) {
 	w = float64(v.w) - 2*winGrip - 40
-	h = float64(v.h) - 2*(winTitleH+winGrip)
+	h = float64(v.h) - float64(2*(winTitleH+winGrip))
 	if w < 80 {
 		w = 80
 	}
@@ -1981,22 +2723,23 @@ func (v *view) maxWinSize() (w, h float64) {
 	return
 }
 
-// clampWin caps a window's size and keeps it inside the viewport, so its title
-// bar and close button always stay reachable.
-func (v *view) clampWin(w *managedWin) {
+// capWin caps a window's board size, so that on screen it never grows past
+// maxWinSize, and keeps it inside the viewport, so its title bar and close
+// button always stay reachable.
+func (v *view) capWin(w *managedWin) {
 	mw, mh := v.maxWinSize()
-	if w.wp > mw {
-		w.wp = mw
+	if w.bw*v.zoom > mw {
+		w.bw = mw / v.zoom
 	}
-	if w.hp > mh {
-		w.hp = mh
+	if w.bh*v.zoom > mh {
+		w.bh = mh / v.zoom
 	}
 	v.clampPos(w)
 }
 
 // clampPos nudges a window back so its frame stays on screen.
 func (v *view) clampPos(w *managedWin) {
-	sw, sh := int(math.Round(w.wp)), int(math.Round(w.hp))
+	_, _, sw, sh := v.winRect(w)
 	x, y := v.sx(w.bx), v.sy(w.by)
 	maxX := v.w - sw - winGrip
 	if maxX < 8 {
@@ -2031,11 +2774,34 @@ func (v *view) onChildConfigure(ce *C.XConfigureEvent) {
 			continue
 		}
 		cw, ch := int(ce.width), int(ce.height)
-		if cw <= 0 || ch <= 0 || (cw == w.lastW && ch == w.lastH) {
-			return // a resize we made ourselves
+		if cw <= 0 || ch <= 0 {
+			return
 		}
-		w.wp, w.hp = float64(cw), float64(ch)
-		v.clampWin(w)
+		// The board moves the application itself (into its frame or out of
+		// it): only the place changed, the size is the same. Such a move is
+		// not a resize of the application and must not resize its frame.
+		if cw == int(math.Round(w.aw)) && ch == int(math.Round(w.ah)) {
+			return
+		}
+		// First, drop the echoes of resizes the board made itself: after a
+		// burst of resizes (drag, zoom) an echo can arrive late and report an
+		// outdated size, which would otherwise flap the window back and forth.
+		for i, r := range w.selfReq {
+			if r[0] == cw && r[1] == ch {
+				w.selfReq = append(w.selfReq[:i], w.selfReq[i+1:]...)
+				return
+			}
+		}
+		// While the grip is resizing the window the application keeps refusing
+		// or echoing sizes; the final one wins after the drag ends.
+		if v.winResize >= 0 && v.wins[v.winResize].win == w.win {
+			return
+		}
+		// The application resized itself: record its real pixel size and pin
+		// the frame over it, so the board shows the new size at this zoom.
+		w.aw, w.ah = float64(cw), float64(ch)
+		w.bw, w.bh = w.aw, w.ah
+		v.capWin(w)
 		v.placeWindows()
 		v.redraw = true
 		return
@@ -2052,21 +2818,69 @@ func (v *view) adopt(win C.Window, cx, cy float64) {
 	if attr.override_redirect != 0 || attr.width == 0 || attr.height == 0 {
 		return
 	}
+	// The frame of the window is a plane of the canvas: its size is fixed
+	// in board units (the pixels of the application) and it scales with the
+	// zoom of the board, like every other object of the canvas.
 	bw := float64(attr.width)
 	bh := float64(attr.height)
-	C.XReparentWindow(v.dpy, win, v.win, 0, 0)
-	C.XSetWindowBorderWidth(v.dpy, win, 0)
-	C.XMapWindow(v.dpy, win)
-	v.wins = append(v.wins, managedWin{
+	// Containers clip the application to the frame: the app keeps its own
+	// pixel size, the viewport only scales the frame around it. The container
+	// has no background, so the miniature the board paints shows through it.
+	cont := C.canvas_container(v.dpy, v.win, C.uint(attr.width),
+		C.uint(attr.height))
+	C.XMapWindow(v.dpy, cont)
+	// The application can render into a pixmap, which the board then draws
+	// scaled in the frame of the window. Not every server allows it: under a
+	// compositor the windows of the clients are already redirected, and the
+	// window then has to stay a window of its own, floating over the board.
+	redir := false
+	if C.canvas_redirect(v.dpy, win) != 0 && C.canvas_composite_broken() == 0 {
+		// The application is redirected a moment later: it has to paint
+		// itself before the redirect, or the board would keep what was on
+		// the screen instead of the content of the application.
+		v.redirWait = append(v.redirWait, redirWait{win: win, until: time.Now().Add(3 * time.Second)})
+		go func() {
+			time.Sleep(3 * time.Second)
+			wake()
+		}()
+		redir = true
+	}
+	if redir {
+		C.XReparentWindow(v.dpy, win, cont, 0, 0)
+		C.XSetWindowBorderWidth(v.dpy, win, 0)
+		C.XMapWindow(v.dpy, win)
+	}
+	w := managedWin{
 		win:   win,
+		cont:  cont,
 		title: windowTitle(v.dpy, win),
-		bx:    cx - (bw/2)/v.zoom,
-		by:    cy - (bh/2)/v.zoom,
-		wp:    bw,
-		hp:    bh,
+		vis:   attr.visual,
+		redir: false, // the application is redirected a moment later
+		float: !redir,
+		bx:    cx - bw/2,
+		by:    cy - bh/2,
+		bw:    bw,
+		bh:    bh,
+		aw:    float64(attr.width),
+		ah:    float64(attr.height),
 		lastX: -1 << 30, lastY: -1 << 30, lastW: -1, lastH: -1,
-	})
-	v.clampWin(&v.wins[len(v.wins)-1])
+	}
+	if redir {
+		// The application stays live in its frame until the redirect: it
+		// paints itself while the board waits.
+		C.XMoveWindow(v.dpy, win, 0, 0)
+	}
+	if v.dmgOK {
+		w.dmg = C.XDamageCreate(v.dpy, win, C.XDamageReportNonEmpty)
+	}
+	if kind, ok := v.widgetKinds[C.ulong(win)]; ok {
+		w.widget = true
+		w.widgetKind = kind
+		w.widgetXID = C.ulong(win)
+	}
+	v.adopted[win] = true
+	v.wins = append(v.wins, w)
+	v.capWin(&v.wins[len(v.wins)-1])
 	v.placeWindows()
 	v.redraw = true
 	fmt.Printf("canvas: adopted window 0x%x %dx%d\n", uint64(win), attr.width, attr.height)
@@ -2075,11 +2889,25 @@ func (v *view) adopt(win C.Window, cx, cy float64) {
 func (v *view) forget(win C.Window) {
 	for i := range v.wins {
 		if v.wins[i].win == win {
+			// The container dies with the application: destroying it also
+			// removes the child window from the display.
+			if v.thumbP == i {
+				v.thumbP = -1
+			} else if v.thumbP > i {
+				v.thumbP--
+			}
+			delete(v.adopted, win)
+			if v.kbFocus == win {
+				v.kbFocus = v.win
+				C.XSetInputFocus(v.dpy, v.win, C.PointerRoot, C.CurrentTime)
+			}
+			C.XDestroyWindow(v.dpy, v.wins[i].cont)
 			v.wins = append(v.wins[:i], v.wins[i+1:]...)
 			v.redraw = true
 			return
 		}
 	}
+	delete(v.adopted, win)
 }
 
 // raiseWindow brings a managed window to the front, both in X's stacking order
@@ -2095,28 +2923,37 @@ func (v *view) raiseWindow(win C.Window) {
 		w := v.wins[i]
 		copy(v.wins[i:], v.wins[i+1:])
 		v.wins[len(v.wins)-1] = w
-		C.XRaiseWindow(v.dpy, win)
+		C.XRaiseWindow(v.dpy, w.cont)
 		C.XFlush(v.dpy)
 		v.redraw = true
 		return
 	}
 }
 
-// winRect is the on-screen rectangle of a managed window's content, with the
-// same minimum size the window itself is given. Frames are built around it so
-// the drawn bar, the grip and the real child window never disagree.
+// winRect is the on-screen rectangle of a managed window's frame/container: its
+// board size scaled by the viewport zoom, clamped to the limits the frame
+// itself is given (never smaller than 80x60, never larger than maxWinSize).
+// The title bar, the grip and the container are built around the same rect so
+// they never disagree.
 func (v *view) winRect(w *managedWin) (x, y, sw, sh int) {
 	x = v.sx(w.bx)
 	y = v.sy(w.by)
-	sw = int(math.Round(w.wp))
-	sh = int(math.Round(w.hp))
-	if sw < 80 {
-		sw = 80
+	fw, fh := w.bw*v.zoom, w.bh*v.zoom
+	if mw, mh := v.maxWinSize(); fw > mw || fh > mh {
+		if fw > mw {
+			fw = mw
+		}
+		if fh > mh {
+			fh = mh
+		}
 	}
-	if sh < 60 {
-		sh = 60
+	if fw < 80 {
+		fw = 80
 	}
-	return
+	if fh < 60 {
+		fh = 60
+	}
+	return x, y, int(math.Round(fw)), int(math.Round(fh))
 }
 
 func (v *view) titlePx() int {
@@ -2127,22 +2964,179 @@ func (v *view) gripPx() int {
 	return winGrip
 }
 
-// placeWindows keeps every managed window pinned to its board position. Sizes
-// are left alone: the viewport zoom only moves windows, never resizes them.
+// winMini tells whether the content of a window is a picture the board
+// paints: the application is redirected, so the server keeps no content of
+// its own and the board draws the application in its frame.
+func (v *view) winMini(w *managedWin) bool {
+	return w.redir && C.canvas_composite_broken() == 0
+}
+
+// placeWindows keeps every managed window frame pinned to its board position
+// and scaled to its board size times the viewport zoom: frames follow the
+// canvas exactly like the icons do. When the frame shrinks past the
+// application's own size the content would clip, so the window turns into a
+// miniature: the real window hides outside the container's clip and the board
+// composites a scaled copy of it. When the frame grows back (viewport zoomed
+// in) the application returns live into the frame's top-left corner.
 func (v *view) placeWindows() {
 	changed := false
 	for i := range v.wins {
 		w := &v.wins[i]
 		x, y, sw, sh := v.winRect(w)
-		if x == w.lastX && y == w.lastY && sw == w.lastW && sh == w.lastH {
+		if w.float {
+			// The window follows the board, right under its title bar. It is
+			// a window of its own, so it is placed in the coordinates of the
+			// screen, and it is raised above the board: the board paints
+			// itself over the whole of its window, and would hide it.
+			var rx, ry C.int
+			var child C.Window
+			C.XTranslateCoordinates(v.dpy, C.XDefaultRootWindow(v.dpy), v.win,
+				0, 0, &rx, &ry, &child)
+			C.XMoveWindow(v.dpy, w.win, C.int(rx)+C.int(x), C.int(ry)+C.int(y))
+			C.XRaiseWindow(v.dpy, w.win)
+			w.lastX, w.lastY, w.lastW, w.lastH = x, y, sw, sh
+			changed = true
 			continue
 		}
-		C.XMoveResizeWindow(v.dpy, w.win, C.int(x), C.int(y), C.uint(sw), C.uint(sh))
+		// A redirected application renders into a pixmap the board draws
+		// in the frame of the window. It is parked inside the container,
+		// past its clip: the server keeps the whole content in the pixmap,
+		// and the screen shows nothing of it. The board is the only painter
+		// of the content: the window is a plane of the canvas.
+		mini := v.winMini(w)
+		moved := x != w.lastX || y != w.lastY ||
+			sw != w.lastW || sh != w.lastH
+		if mini != w.tmb {
+			w.tmb = mini
+			moved = true
+			v.redraw = true
+		}
+		if !moved {
+			continue
+		}
+		C.XMoveResizeWindow(v.dpy, w.cont, C.int(x), C.int(y), C.uint(sw), C.uint(sh))
+		// A redirected application is not painted by the server: the board
+		// paints it in its frame. It stays in the corner of the container,
+		// where the server keeps rendering it into its storage.
+		C.XMoveWindow(v.dpy, w.win, 0, 0)
 		w.lastX, w.lastY, w.lastW, w.lastH = x, y, sw, sh
 		changed = true
 	}
 	if changed {
 		C.XFlush(v.dpy)
+	}
+}
+
+// bootComposite checks the extensions the miniatures need. Without them the
+// board falls back to clipping the live application inside its frame.
+func (v *view) bootComposite() {
+	var cmajor, cminor C.int
+	if C.XCompositeQueryVersion(v.dpy, &cmajor, &cminor) != C.True {
+		fmt.Fprintln(os.Stderr, "canvas: composite extension unavailable, windows clip instead of scaling")
+		return
+	}
+	C.canvas_set_composite_opcode(v.dpy)
+	// The redirect is verified lazily: XCompositeNameWindowPixmap in childBrush
+	// skips miniatures whose backing pixmap cannot be fetched.
+	v.compOK = true
+	var dmajor, dminor C.int
+	if C.XDamageQueryVersion(v.dpy, &dmajor, &dminor) != C.True {
+		fmt.Fprintln(os.Stderr, "canvas: damage extension unavailable, miniatures refresh on redraw only")
+		return
+	}
+	v.dmgOK = true
+}
+
+// childBrush refreshes the backing pixmap and its render picture after the
+// application has resized itself: the composite backing pixmap dies with every
+// geometry change.
+func (v *view) childBrush(w *managedWin) {
+	if !v.compOK {
+		return
+	}
+	awn, ahn := int(math.Round(w.aw)), int(math.Round(w.ah))
+	if w.cpic != 0 && w.cpw == awn && w.cph == ahn {
+		return
+	}
+	if w.cpic != 0 {
+		C.XRenderFreePicture(v.dpy, w.cpic)
+		C.XFreePixmap(v.dpy, w.cpm)
+		w.cpic, w.cpm, w.cpw, w.cph = 0, 0, 0, 0
+	}
+	pm := C.XCompositeNameWindowPixmap(v.dpy, w.win)
+	if pm == 0 {
+		return
+	}
+	format := C.XRenderFindVisualFormat(v.dpy, w.vis)
+	if format == nil {
+		C.XFreePixmap(v.dpy, pm)
+		return
+	}
+	w.cpic = C.XRenderCreatePicture(v.dpy, pm, format, 0, nil)
+	w.cpm = pm
+	w.cpw, w.cph = awn, ahn
+}
+
+// drawContent paints the content of an application in its frame. The frame is
+// a plane of the canvas: the content of the application is scaled to fill it,
+// so the window grows and shrinks with the zoom of the board, like every
+// other object of the canvas.
+func (v *view) drawContent(w *managedWin) {
+	if w.virtual {
+		return
+	}
+	v.childBrush(w)
+	if w.cpic == 0 || v.dpict == 0 {
+		return
+	}
+	x, y, sw, sh := v.winRect(w)
+	awn, ahn := int(math.Round(w.aw)), int(math.Round(w.ah))
+	if sw <= 0 || sh <= 0 || awn <= 0 || ahn <= 0 {
+		return
+	}
+	// The transform of a picture maps the place of the destination to the
+	// place of the source: the content is scaled to fill the frame.
+	var t C.XTransform
+	t.matrix[0][0] = C.int(int64(awn) * 65536 / int64(sw))
+	t.matrix[1][1] = C.int(int64(ahn) * 65536 / int64(sh))
+	t.matrix[2][2] = 1 << 16
+	C.XRenderSetPictureTransform(v.dpy, w.cpic, &t)
+	C.XRenderSetPictureFilter(v.dpy, w.cpic, C.CString("bilinear"), nil, 0)
+	C.XRenderComposite(v.dpy, C.PictOpSrc, w.cpic, 0, v.dpict,
+		0, 0, 0, 0,
+		C.int(x), C.int(y), C.uint(sw), C.uint(sh))
+}
+
+// watchDir reports changes of the desktop folder, so files added from outside
+// (another file manager, a browser download, a shell redirect) appear on the
+// board without a manual refresh.
+func watchDir(root string, out chan<- int) {
+	fd, err := syscall.InotifyInit1(0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "canvas: inotify:", err)
+		return
+	}
+	mask := syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_TO |
+		syscall.IN_MOVED_FROM | syscall.IN_CLOSE_WRITE | syscall.IN_MOVED_TO
+	if _, err := syscall.InotifyAddWatch(fd, root, uint32(mask)); err != nil {
+		fmt.Fprintln(os.Stderr, "canvas: inotify add:", err)
+		return
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, err := syscall.Read(fd, buf)
+		if err != nil {
+			return
+		}
+		if n <= 0 {
+			continue
+		}
+		// Coalesce a burst of events into one reload; the channel drops what
+		// the board has not consumed yet.
+		select {
+		case out <- 1:
+		default:
+		}
 	}
 }
 
@@ -2173,7 +3167,7 @@ func (v *view) winAt(x, y int) (int, int) {
 	for i := len(v.wins) - 1; i >= 0; i-- {
 		x0, y0, sw, sh := v.winRect(&v.wins[i])
 		if x >= x0 && x < x0+sw && y >= y0-th && y < y0 {
-			if x >= x0+sw-th {
+			if x >= x0+sw-winClose {
 				return i, partClose
 			}
 			return i, partTitle
@@ -2190,8 +3184,10 @@ func (v *view) beginWinDrag(i, part, x, y int) {
 	w := &v.wins[i]
 	v.dragSX, v.dragSY = x, y
 	v.dragBX, v.dragBY = w.bx, w.by
-	v.dragBW, v.dragBH = w.wp, w.hp
-	_, _, v.dragSW, v.dragSH = v.winRect(w)
+	// The resize grip scales the application's own pixel size: the frame is
+	// re-pinned over it afterwards.
+	v.dragSW, v.dragSH = int(math.Round(w.aw)), int(math.Round(w.ah))
+	v.dragBW, v.dragBH = w.aw, w.ah
 	switch part {
 	case partTitle:
 		v.winDrag = i
@@ -2200,14 +3196,117 @@ func (v *view) beginWinDrag(i, part, x, y int) {
 	}
 }
 
-func (v *view) stopWinDrag() {
+func (v *view) stopWinDrag() { // Clamp the frame only now: during the resize it jumped around with every
+	// motion, which made the title bar twitch above the grip.
+	if v.winResize >= 0 && v.winResize < len(v.wins) {
+		v.capWin(&v.wins[v.winResize])
+	}
 	v.winDrag, v.winResize = -1, -1
+}
+
+// contentWinAt reports the index of the window whose content lies under the
+// screen point, or -1. The content of an application is a picture the board
+// paints: the pointer belongs to the application, not to the board.
+func (v *view) contentWinAt(x, y int) int {
+	for i := len(v.wins) - 1; i >= 0; i-- {
+		w := &v.wins[i]
+		if !w.redir || C.canvas_composite_broken() != 0 {
+			continue
+		}
+		fx, fy, fw, fh := v.winRect(w)
+		if x >= fx && x < fx+fw && y >= fy && y < fy+fh {
+			return i
+		}
+	}
+	return -1
+}
+
+// thumbLocal maps a point on the content of a window to the corresponding
+// point of the application's real window. The content is scaled to fill the
+// frame, so the point is scaled back.
+func (v *view) thumbLocal(w *managedWin, x, y int) (lx, ly int) {
+	fx, fy, fw, fh := v.winRect(w)
+	awn, ahn := int(math.Round(w.aw)), int(math.Round(w.ah))
+	if fw < 1 {
+		fw = 1
+	}
+	if fh < 1 {
+		fh = 1
+	}
+	lx = int((float64(x-fx) * float64(awn) / float64(fw)) + 0.5)
+	ly = int((float64(y-fy) * float64(ahn) / float64(fh)) + 0.5)
+	if lx < 0 {
+		lx = 0
+	}
+	if ly < 0 {
+		ly = 0
+	}
+	if lx > awn-1 {
+		lx = awn - 1
+	}
+	if ly > ahn-1 {
+		ly = ahn - 1
+	}
+	return lx, ly
+}
+
+// synthButton re-delivers a button event to a miniaturized window at the
+// position it holds behind the miniature. XSendEvent marks the events as
+// synthetic; toolkits accept them for on-screen keyboards already.
+func (v *view) synthButton(w *managedWin, btn int, press bool, lx, ly, rx, ry int, state uint) {
+	var ev C.XButtonEvent
+	ev._type = C.ButtonPress
+	if !press {
+		ev._type = C.ButtonRelease
+	}
+	ev.send_event = C.True
+	ev.display = v.dpy
+	ev.window = w.win
+	ev.root = C.XDefaultRootWindow(v.dpy)
+	ev.subwindow = 0
+	ev.time = v.evTime
+	ev.x, ev.y = C.int(lx), C.int(ly)
+	ev.x_root, ev.y_root = C.int(rx), C.int(ry)
+	ev.state = C.uint(state)
+	ev.button = C.uint(btn)
+	ev.same_screen = C.True
+	C.XSendEvent(v.dpy, w.win, C.False,
+		C.ButtonPressMask|C.ButtonReleaseMask|C.PointerMotionMask,
+		(*C.XEvent)(unsafe.Pointer(&ev)))
+	C.XFlush(v.dpy)
+}
+
+// synthMotion re-delivers pointer motion to a miniaturized window.
+func (v *view) synthMotion(w *managedWin, lx, ly, rx, ry int, state uint) {
+	var ev C.XMotionEvent
+	ev._type = C.MotionNotify
+	ev.send_event = C.True
+	ev.display = v.dpy
+	ev.window = w.win
+	ev.root = C.XDefaultRootWindow(v.dpy)
+	ev.subwindow = 0
+	ev.time = v.evTime
+	ev.is_hint = 0
+	ev.x, ev.y = C.int(lx), C.int(ly)
+	ev.x_root, ev.y_root = C.int(rx), C.int(ry)
+	ev.state = C.uint(state)
+	ev.same_screen = C.True
+	C.XSendEvent(v.dpy, w.win, C.False,
+		C.PointerMotionMask|C.ButtonMotionMask,
+		(*C.XEvent)(unsafe.Pointer(&ev)))
+	C.XFlush(v.dpy)
 }
 
 // closeWin asks an application to close its window: politely through
 // WM_DELETE_WINDOW when it advertises the protocol, forcibly otherwise.
 func (v *view) closeWin(i int) {
 	w := &v.wins[i]
+	if w.virtual {
+		if w.title == "Настройки" {
+			v.closeSettings()
+		}
+		return
+	}
 	del := C.XInternAtom(v.dpy, C.CString("WM_DELETE_WINDOW"), C.False)
 	var protos *C.Atom
 	var n C.int
@@ -2243,8 +3342,18 @@ func (v *view) sendDelete(win C.Window, del C.Atom) {
 	C.XFlush(v.dpy)
 }
 
+// drawBed paints the body of a managed window: the panel its frame stands
+// on. The container of the window has no background of its own, so the panel
+// shows through it wherever the application does not cover it.
+func (v *view) drawBed(w *managedWin) {
+	x, y, sw, sh := v.winRect(w)
+	v.fill(x, y, sw, sh, panelBg)
+}
+
 // drawWins paints each managed window's frame: a title bar above it and a
-// scaling grip just below its bottom-right corner.
+// scaling grip just below its bottom-right corner. The look of the frame
+// follows the active style: its corners may be rounded, its bar may carry a
+// gradient, a bevel or the soft highlight of the glass styles.
 func (v *view) drawWins() {
 	th, g := v.titlePx(), v.gripPx()
 	for i := range v.wins {
@@ -2255,27 +3364,93 @@ func (v *view) drawWins() {
 		if i == len(v.wins)-1 {
 			bar = winTitleOn
 		}
-		v.fill(x, y-th, sw, th, bar)
+		v.drawTitleBar(x, y-th, sw, th, bar)
 		if w.title != "" {
-			v.text(x+6, y-th+th-5, v.fitText(w.title, sw-winClose-12), winTitleFg)
+			v.text(x+8, y-th+th-6, v.fitText(w.title, sw-winClose-16), winTitleFg)
 		}
 
 		// Close button at the right end of the title bar.
 		cbx, cby := x+sw-winClose, y-th
-		v.fill(cbx, cby, winClose, th, winCloseBg)
-		v.fg(winCloseFg)
-		p := winClose / 4
-		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(cbx+p), C.int(cby+p), C.int(cbx+winClose-p), C.int(cby+th-p))
-		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(cbx+winClose-p), C.int(cby+p), C.int(cbx+p), C.int(cby+th-p))
+		v.drawCloseButton(cbx, cby, winClose, th)
 
 		gx := x + sw - g
 		gy := y + sh
-		v.fill(gx, gy, g, g, winGripCol)
-		v.fg(bg)
-		for k := 1; k <= 3; k++ {
-			o := k * g / 4
-			C.XDrawLine(v.dpy, v.pm, v.gc, C.int(gx+o), C.int(gy+g), C.int(gx+g), C.int(gy+o))
-		}
+		v.drawGrip(gx, gy, g)
+	}
+}
+
+// drawTitleBar paints the bar that carries the title of a window. The style
+// decides its shape: the corners are rounded, the colour runs from a light
+// shade to a dark one, the classic style raises the bar and the glass styles
+// let the board shine through it.
+func (v *view) drawTitleBar(x, y, w, h int, c color) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	top, bottom := c, c
+	switch {
+	case styleGradient:
+		top, bottom = lighten(c, 0.35), darken(c, 0.20)
+	case styleGlass:
+		// The glass styles put a translucent panel over the board.
+		base := mix(c, bg, 0.35)
+		top, bottom = lighten(base, 0.45), darken(base, 0.10)
+	}
+	r := styleRadius
+	if r > h/2 {
+		r = h / 2
+	}
+	if r > w/2 {
+		r = w / 2
+	}
+	if r <= 0 && top == bottom {
+		v.fill(x, y, w, h, c)
+	} else {
+		v.fillRoundTop(x, y, w, h, r, top, bottom)
+	}
+	if styleGlass {
+		// The soft highlight of the glass: a bright line along the top edge.
+		v.fill(x+r, y, w-2*r, 1, lighten(top, 0.45))
+	}
+	if styleBevel {
+		// The classic raised bar: the light comes from the top left.
+		v.bevel(x, y, w, h, false)
+	}
+}
+
+// drawCloseButton paints the button that closes a window.
+func (v *view) drawCloseButton(x, y, w, h int) {
+	r := styleRadius
+	if r > h/2 {
+		r = h / 2
+	}
+	if r > w/2 {
+		r = w / 2
+	}
+	v.fillRound(x, y, w, h, r, winCloseBg)
+	if styleBevel {
+		v.bevel(x, y, w, h, false)
+	}
+	v.fg(winCloseFg)
+	p := w / 4
+	C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x+p), C.int(y+p),
+		C.int(x+w-p), C.int(y+h-p))
+	C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x+w-p), C.int(y+p),
+		C.int(x+p), C.int(y+h-p))
+}
+
+// drawGrip paints the corner that scales a window.
+func (v *view) drawGrip(x, y, g int) {
+	r := styleRadius
+	if r > g/2 {
+		r = g / 2
+	}
+	v.fillRound(x, y, g, g, r, winGripCol)
+	v.fg(bg)
+	for k := 1; k <= 3; k++ {
+		o := k * g / 4
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x+o), C.int(y+g),
+			C.int(x+g), C.int(y+o))
 	}
 }
 
@@ -2293,45 +3468,18 @@ func (v *view) cycleWindows(back bool) {
 			w := v.wins[n-1]
 			copy(v.wins[1:], v.wins[:n-1])
 			v.wins[0] = w
-			C.XRaiseWindow(v.dpy, v.wins[n-1].win)
+			C.XRaiseWindow(v.dpy, v.wins[n-1].cont)
 		} else {
 			w := v.wins[0]
 			copy(v.wins, v.wins[1:])
 			v.wins[n-1] = w
-			C.XRaiseWindow(v.dpy, w.win)
+			C.XRaiseWindow(v.dpy, w.cont)
 		}
 	} else {
-		C.XRaiseWindow(v.dpy, v.wins[0].win)
+		C.XRaiseWindow(v.dpy, v.wins[0].cont)
 	}
 	C.XFlush(v.dpy)
 	v.redraw = true
-}
-
-// grabSwitcher takes Shift+Tab and Alt+F4 at the root, so they work even while
-// the keyboard focus is inside an application (kitty, editors, ...). Alt+F4 is a
-// last-resort way to close a window whose frame is off screen.
-func (v *view) grabSwitcher() {
-	C.canvas_ignore_badaccess()
-	root := C.XDefaultRootWindow(v.dpy)
-	mods := []C.uint{0, C.LockMask, C.Mod2Mask, C.LockMask | C.Mod2Mask}
-	grabs := []struct {
-		ks  C.KeySym
-		mod C.uint
-	}{
-		{0xff09, C.ShiftMask}, // Shift+Tab: switch windows
-		{0xffc1, C.Mod1Mask},  // Alt+F4: close the active window
-	}
-	for _, g := range grabs {
-		kc := C.XKeysymToKeycode(v.dpy, g.ks)
-		if kc == 0 {
-			continue
-		}
-		for _, m := range mods {
-			C.XGrabKey(v.dpy, C.int(kc), g.mod|m, root,
-				C.True, C.GrabModeAsync, C.GrabModeAsync)
-		}
-	}
-	C.XFlush(v.dpy)
 }
 
 func (v *view) layout() {
@@ -2420,6 +3568,15 @@ func (v *view) resize(w, h int) {
 	}
 	v.xftDraw = C.XftDrawCreate(v.dpy, C.Drawable(v.pm), v.visual, v.cmap)
 	v.w, v.h = w, h
+	// The destination picture rides on the same pixmap; rebuild it whenever
+	// the pixmap is rebuilt.
+	if v.dpict != 0 {
+		C.XRenderFreePicture(v.dpy, v.dpict)
+	}
+	v.dpict = 0
+	if fmt := C.XRenderFindVisualFormat(v.dpy, v.visual); fmt != nil {
+		v.dpict = C.XRenderCreatePicture(v.dpy, v.pm, fmt, 0, nil)
+	}
 	v.wallResize()
 }
 
@@ -2433,12 +3590,27 @@ func (v *view) paint() {
 	}
 	v.drawIcons()
 	v.drawBand()
+	// The settings window is drawn on its own canvas and scaled into its
+	// frame, so that it follows the zoom of the board like every other
+	// object of the board.
+	v.renderSettings()
+	// The body of every managed window and, over it, the content of the
+	// application. The frames are painted over them.
+	for i := range v.wins {
+		v.drawBed(&v.wins[i])
+		if v.wins[i].redir {
+			v.drawContent(&v.wins[i])
+		}
+	}
+	v.compositeSettings()
 	v.drawWins()
 	v.hud()
 	v.drawMenu()
 	v.drawPrompt()
 	v.drawStatus()
 	v.placeWindows()
+	// The interface of the board lies above the applications.
+	v.raisePopup()
 }
 
 // gridStep picks a 1/2/5-based spacing so the minor grid stays near gridPx
@@ -2507,6 +3679,7 @@ func (v *view) axes() {
 
 func (v *view) drawIcons() {
 	z := v.zoom
+	animActive.Store(false)
 	for i, ic := range v.icons {
 		sx, sy := v.sx(ic.x), v.sy(ic.y)
 		cw := int(math.Round(ic.w * z))
@@ -2528,6 +3701,16 @@ func (v *view) drawIcons() {
 			C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(sx), C.int(sy),
 				C.uint(cw-1), C.uint(ch-1))
 		}
+		if i == v.dropTarget {
+			// The folder the dragged icons would fall into.
+			v.fill(sx, sy, cw, ch, selBg)
+			v.fg(selBorder)
+			for k := 0; k < 3; k++ {
+				C.XDrawRectangle(v.dpy, v.pm, v.gc,
+					C.int(sx-k*2), C.int(sy-k*2),
+					C.uint(cw+4*k), C.uint(ch+4*k))
+			}
+		}
 
 		tw := int(math.Round(tile * z))
 		if tw < 2 {
@@ -2541,8 +3724,14 @@ func (v *view) drawIcons() {
 		case ic.isApp:
 			v.appGlyph(tx, ty, tw, bgc)
 		default:
-			if ic.thumb != nil && tw >= 48 && v.depth == 24 {
-				v.drawThumb(tx, ty, tw, ic.thumb)
+			img := ic.thumb
+			if ic.anim != nil && v.cfg.Anim.GifEnabled {
+				// The animation plays in the icon itself.
+				img = ic.anim.frameAt(time.Now())
+				animActive.Store(true)
+			}
+			if img != nil && tw >= 48 && v.depth == 24 {
+				v.drawThumb(tx, ty, tw, img)
 				e := strings.ToLower(filepath.Ext(ic.name))
 				if isVideo(e) {
 					v.playBadge(tx, ty, tw)
@@ -2559,20 +3748,39 @@ func (v *view) drawIcons() {
 			if name == "" {
 				name = ic.name
 			}
-			label := v.fitText(name, cw-6)
-			lw := v.textWidth(label)
-			lx := sx + (cw-lw)/2
-			if lx < sx {
-				lx = sx
-			}
-			ly := ty + tw + 14
 			col := hudCol
 			if v.selset[i] {
 				col = textCol
 			}
-			v.text(lx, ly, label, col)
+			// A long name is broken into several lines, the room under the
+			// icon decides how many of them fit.
+			room := int(math.Round((cellH+gapY)*z)) - tw - 10
+			lines := room / 11
+			if lines < 1 {
+				lines = 1
+			}
+			if lines > 3 {
+				lines = 3
+			}
+			for k, line := range v.wrapText(name, cw-4, lines) {
+				lw := v.textWidth(line)
+				lx := sx + (cw-lw)/2
+				if lx < sx {
+					lx = sx
+				}
+				v.text(lx, ty+tw+9+k*11, line, col)
+			}
 		}
 	}
+}
+
+// glyphVariant is the look of the icons: the style decides, unless the user
+// has chosen another one in the settings.
+func (v *view) glyphVariant() string {
+	if v.cfg.Icons.Style != "" && v.cfg.Icons.Style != "auto" {
+		return v.cfg.Icons.Style
+	}
+	return styleIconShape
 }
 
 func (v *view) folderGlyph(tx, ty, tw int, up bool) {
@@ -2580,8 +3788,32 @@ func (v *view) folderGlyph(tx, ty, tw int, up bool) {
 	if m < 1 {
 		m = 1
 	}
-	v.fill(tx+m, ty+tw/5, tw/2-m/2, tw/9, folderCol)
-	v.fill(tx+m, ty+tw/4, tw-2*m, tw*3/5, folderCol)
+	switch v.glyphVariant() {
+	case "outline":
+		// Only the contour of the folder.
+		v.fg(folderCol)
+		C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(tx+m), C.int(ty+tw/4),
+			C.uint(tw-2*m-1), C.uint(tw*3/5-1))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(tx+m), C.int(ty+tw/4),
+			C.int(tx+m), C.int(ty+tw/5))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(tx+m), C.int(ty+tw/5),
+			C.int(tx+tw/2-m/2), C.int(ty+tw/5))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(tx+tw/2-m/2), C.int(ty+tw/5),
+			C.int(tx+tw/2-m/2), C.int(ty+tw/4))
+	case "classic":
+		// The folder of the old style: a light top and a dark bottom.
+		v.fill(tx+m, ty+tw/5, tw/2-m/2, tw/9, folderCol)
+		v.fill(tx+m, ty+tw/4, tw-2*m, tw*3/5, folderCol)
+		v.fill(tx+m+1, ty+tw/4+1, tw-2*m-2, tw/12, lighten(folderCol, 0.45))
+		v.fill(tx+m+1, ty+tw*3/5+tw/4-tw/14, tw-2*m-2, tw/14, darken(folderCol, 0.35))
+	case "glass":
+		v.fill(tx+m, ty+tw/5, tw/2-m/2, tw/9, folderCol)
+		v.fill(tx+m, ty+tw/4, tw-2*m, tw*3/5, folderCol)
+		v.fill(tx+m+2, ty+tw/4+2, tw-2*m-4, tw/8, lighten(folderCol, 0.55))
+	default:
+		v.fill(tx+m, ty+tw/5, tw/2-m/2, tw/9, folderCol)
+		v.fill(tx+m, ty+tw/4, tw-2*m, tw*3/5, folderCol)
+	}
 	if up {
 		v.fg(bg)
 		cx := tx + tw/2
@@ -2600,7 +3832,18 @@ func (v *view) appGlyph(tx, ty, tw int, bgc color) {
 	if m < 1 {
 		m = 1
 	}
-	v.fill(tx+m, ty+m, tw-2*m, tw-2*m, appGlyph)
+	switch v.glyphVariant() {
+	case "outline":
+		v.fg(appGlyph)
+		C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(tx+m), C.int(ty+m),
+			C.uint(tw-2*m-1), C.uint(tw-2*m-1))
+	case "classic":
+		v.fill(tx+m, ty+m, tw-2*m, tw-2*m, appGlyph)
+		v.fill(tx+m+1, ty+m+1, tw-2*m-2, tw/10, lighten(appGlyph, 0.5))
+		v.fill(tx+m+1, ty+tw-m-tw/10, tw-2*m-2, tw/10, darken(appGlyph, 0.35))
+	default:
+		v.fill(tx+m, ty+m, tw-2*m, tw-2*m, appGlyph)
+	}
 	x0 := tx + tw*3/10
 	y0 := ty + tw*3/10
 	w := tw * 4 / 10
@@ -2628,14 +3871,44 @@ func (v *view) fileGlyph(tx, ty, tw int, c, bgc color) {
 	if fold < 1 {
 		fold = 1
 	}
-	v.fill(x0, y0, bw, bh, paperCol)
-	v.fill(x0+bw-fold, y0, fold, fold, bgc)
-	v.fg(foldCol)
-	C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0),
-		C.int(x0+bw-fold), C.int(y0+fold))
-	C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0+fold),
-		C.int(x0+bw), C.int(y0+fold))
-	v.fill(x0+bw/8, y0+bh-bh/5, bw-bw/4, maxInt(bh/11, 2), c)
+	switch v.glyphVariant() {
+	case "outline":
+		v.fg(paperCol)
+		C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(x0), C.int(y0),
+			C.uint(bw-1), C.uint(bh-1))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0),
+			C.int(x0+bw-fold), C.int(y0+fold))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0+fold),
+			C.int(x0+bw), C.int(y0+fold))
+		v.fill(x0+bw/8, y0+bh-bh/5, bw-bw/4, maxInt(bh/11, 2), c)
+	case "classic":
+		v.fill(x0, y0, bw, bh, paperCol)
+		v.fill(x0+bw-fold, y0, fold, fold, bgc)
+		v.fg(foldCol)
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0),
+			C.int(x0+bw-fold), C.int(y0+fold))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0+fold),
+			C.int(x0+bw), C.int(y0+fold))
+		v.fill(x0+1, y0+1, bw-2, maxInt(bh/12, 2), lighten(paperCol, 0.4))
+		v.fill(x0+bw/8, y0+bh-bh/5, bw-bw/4, maxInt(bh/11, 2), c)
+		v.fg(darken(foldCol, 0.4))
+		C.XDrawRectangle(v.dpy, v.pm, v.gc, C.int(x0), C.int(y0),
+			C.uint(bw-1), C.uint(bh-1))
+	case "glass":
+		v.fill(x0, y0, bw, bh, paperCol)
+		v.fill(x0+bw-fold, y0, fold, fold, bgc)
+		v.fill(x0+2, y0+2, bw-4, bh/4, lighten(paperCol, 0.5))
+		v.fill(x0+bw/8, y0+bh-bh/5, bw-bw/4, maxInt(bh/11, 2), c)
+	default:
+		v.fill(x0, y0, bw, bh, paperCol)
+		v.fill(x0+bw-fold, y0, fold, fold, bgc)
+		v.fg(foldCol)
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0),
+			C.int(x0+bw-fold), C.int(y0+fold))
+		C.XDrawLine(v.dpy, v.pm, v.gc, C.int(x0+bw-fold), C.int(y0+fold),
+			C.int(x0+bw), C.int(y0+fold))
+		v.fill(x0+bw/8, y0+bh-bh/5, bw-bw/4, maxInt(bh/11, 2), c)
+	}
 }
 
 func (v *view) hud() {
@@ -2698,6 +3971,62 @@ func (v *view) textWidth(s string) int {
 		return int(ext.xOff)
 	}
 	return len([]rune(s)) * 7
+}
+
+// wrapText breaks a text into the lines that fit into a width. A word that
+// is longer than the width is cut in two.
+func (v *view) wrapText(s string, maxPx int, maxLines int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		candidate := w
+		if cur != "" {
+			candidate = cur + " " + w
+		}
+		if v.textWidth(candidate) <= maxPx {
+			cur = candidate
+			continue
+		}
+		if cur != "" {
+			lines = append(lines, cur)
+			cur = ""
+		}
+		runes := []rune(w)
+		// A word that is a little too long keeps its line and sticks out a
+		// little; only a very long word is cut in two.
+		if v.textWidth(w) <= maxPx*3/2 {
+			cur = w
+			continue
+		}
+		for v.textWidth(string(runes)) > maxPx && len(runes) > 1 {
+			cut := len(runes)
+			for cut > 1 && v.textWidth(string(runes[:cut])) > maxPx {
+				cut--
+			}
+			lines = append(lines, string(runes[:cut]))
+			runes = runes[cut:]
+		}
+		cur = string(runes)
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		last := []rune(lines[maxLines-1])
+		for v.textWidth(string(last)+"…") > maxPx && len(last) > 1 {
+			last = last[:len(last)-1]
+		}
+		lines[maxLines-1] = string(last) + "…"
+	}
+	return lines
 }
 
 func (v *view) fitText(s string, maxPx int) string {
@@ -2872,6 +4201,26 @@ func (v *view) drainBackground() {
 		}
 		break
 	}
+	for {
+		select {
+		case <-v.dirEvent:
+			// The desktop folder changed outside the board: re-scan it, so new
+			// files and folders appear and removed ones disappear at once.
+			v.reload(false)
+			continue
+		default:
+		}
+		break
+	}
+	for {
+		select {
+		case files := <-v.importDone:
+			v.applyImported(files)
+			continue
+		default:
+		}
+		break
+	}
 }
 
 // ------------------------------------------------------------ thumbnails -- //
@@ -2880,12 +4229,14 @@ type thumbJob struct {
 	path  string
 	key   string
 	video bool
+	gif   bool // the file is an animated gif
 }
 
 type thumbResult struct {
 	path string
 	key  string
 	img  image.Image
+	anim *gifAnim
 }
 
 func (v *view) startThumbWorkers() {
@@ -2902,9 +4253,35 @@ func (v *view) startThumbWorkers() {
 
 func (v *view) thumbWorker() {
 	for j := range v.thumbJobs {
-		v.thumbDone <- thumbResult{j.path, j.key, thumbToImage(j)}
+		res := thumbResult{path: j.path, key: j.key}
+		if j.gif {
+			res.anim = v.gifAnimation(j)
+			if res.anim != nil {
+				res.img = res.anim.frames[0]
+			}
+		} else {
+			res.img = thumbToImage(j)
+		}
+		v.thumbDone <- res
 		wake()
 	}
+}
+
+// gifAnimation returns the animation of a GIF, decoding it the first time and
+// keeping it in memory afterwards.
+func (v *view) gifAnimation(j thumbJob) *gifAnim {
+	if v.gifCache == nil {
+		v.gifCache = map[string]*gifAnim{}
+	}
+	if a, ok := v.gifCache[j.key]; ok {
+		return a
+	}
+	a := decodeGIF(j.path)
+	if a == nil {
+		return nil
+	}
+	v.gifCache[j.key] = a
+	return a
 }
 
 // requestThumbs queues jobs for every media icon still without a preview.
@@ -2926,8 +4303,17 @@ func (v *view) requestThumbs() {
 		if v.thumbPending[key] {
 			continue
 		}
+		// An animated gif is decoded in the shell itself: the frames have to
+		// be played, not only shown.
+		if strings.EqualFold(filepath.Ext(ic.path), ".gif") && v.cfg.Anim.GifEnabled {
+			if a, cached := v.gifCache[key]; cached {
+				ic.anim = a
+				ic.thumb = a.frames[0]
+				continue
+			}
+		}
 		select {
-		case v.thumbJobs <- thumbJob{ic.path, key, video}:
+		case v.thumbJobs <- thumbJob{ic.path, key, video, strings.EqualFold(filepath.Ext(ic.path), ".gif")}:
 			v.thumbPending[key] = true
 		default:
 			// Queue full: retried on the next board refresh.
@@ -2946,6 +4332,12 @@ func (v *view) applyThumb(r thumbResult) {
 	}
 	for i := range v.icons {
 		if v.icons[i].path == r.path {
+			if r.anim != nil {
+				v.icons[i].anim = r.anim
+				v.icons[i].thumb = r.img
+				v.redraw = true
+				break
+			}
 			if v.icons[i].thumb == nil {
 				v.icons[i].thumb = r.img
 				v.redraw = true

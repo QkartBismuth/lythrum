@@ -20,3 +20,7 @@ export_presets.cfg
 xvfb*.log
 /.directory
 /xvfb-run.sh
+
+# Собранные программы оболочки
+/canvas/canvas
+/canvas/fileman/fileman

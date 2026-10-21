@@ -1,0 +1,30 @@
+/* Metro: flat tiles, one accent colour, square corners. */
+:root {
+  --bg: #14161a;
+  --panel: #161920;
+  --fg: #e8ecf2;
+  --muted: #9aa3b2;
+  --accent: #0078d7;
+  --border: #333a45;
+  --radius: 0px;
+  --font: "Segoe UI", "Noto Sans", sans-serif;
+  --gap: 10px;
+}
+body {
+  background: var(--panel);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  margin: 0;
+  padding: var(--gap);
+}
+button {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 12px;
+  font-family: var(--font);
+  cursor: pointer;
+}
+button:hover { background: var(--accent); }
