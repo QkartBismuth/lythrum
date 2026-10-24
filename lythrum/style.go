@@ -27,6 +27,7 @@ type style struct {
 	Palette palette
 	Metrics metrics
 	Icons   string // flat, outline, classic, glass
+	Cursor  string // the shape of the pointer: fleur, left_ptr, hand2…
 	Sound   soundStyle
 	Widget  string // the file of the style sheet of the widgets
 }
@@ -90,6 +91,7 @@ var (
 	styleGradient  = false
 	styleGlass     = false
 	styleIconShape = "flat"
+	styleCursor    = "fleur"
 	styleFontSize  = 10
 	styleAccent    = color{0x4c, 0x6e, 0xf5}
 	styleSound     = soundStyle{Wave: "sine", Click: 880, Drop: 660, Open: 990,
@@ -157,6 +159,7 @@ func metroStyle() style {
 		Palette: p,
 		Metrics: metrics{TitleH: 22, FontSize: 10},
 		Icons:   "flat",
+		Cursor:  "fleur",
 		Sound: soundStyle{Wave: "sine", Click: 880, Drop: 660, Open: 990,
 			Close: 520, Volume: 0.5},
 		Widget: "metro.css",
@@ -199,6 +202,7 @@ func winUI3Style() style {
 		Palette: p,
 		Metrics: metrics{TitleH: 26, Radius: 8, FontSize: 10},
 		Icons:   "flat",
+		Cursor:  "fleur",
 		Sound: soundStyle{Wave: "sine", Click: 660, Drop: 520, Open: 880,
 			Close: 440, Volume: 0.45},
 		Widget: "winui3.css",
@@ -241,6 +245,7 @@ func material3Style() style {
 		Palette: p,
 		Metrics: metrics{TitleH: 28, Radius: 16, FontSize: 11},
 		Icons:   "outline",
+		Cursor:  "fleur",
 		Sound: soundStyle{Wave: "triangle", Click: 740, Drop: 590, Open: 880,
 			Close: 460, Volume: 0.45},
 		Widget: "material3.css",
@@ -284,6 +289,7 @@ func win95Style() style {
 		Palette: p,
 		Metrics: metrics{TitleH: 20, Bevel: true, Gradient: true, FontSize: 10},
 		Icons:   "classic",
+		Cursor:  "left_ptr",
 		Sound: soundStyle{Wave: "square", Click: 1200, Drop: 900, Open: 1500,
 			Close: 700, Volume: 0.5},
 		Widget: "win95.css",
@@ -326,6 +332,7 @@ func glassStyle() style {
 		Palette: p,
 		Metrics: metrics{TitleH: 28, Radius: 20, Glass: true, FontSize: 11},
 		Icons:   "glass",
+		Cursor:  "hand2",
 		Sound: soundStyle{Wave: "sine", Click: 520, Drop: 400, Open: 700,
 			Close: 340, Volume: 0.35},
 		Widget: "glass.css",
@@ -368,6 +375,7 @@ func applyStyle(s style) {
 	styleGlass = s.Metrics.Glass
 	styleFontSize = s.Metrics.FontSize
 	styleIconShape = s.Icons
+	styleCursor = s.Cursor
 	styleSound = s.Sound
 	styleAccent = p.SelBorder
 }
@@ -406,6 +414,8 @@ func (v *view) applyStyleByName(name string) {
 	s := styleByName(name)
 	applyStyle(s)
 	v.cfg.Style = s.Name
+	// The shape of the pointer belongs to the style.
+	v.cfg.Cursor.Shape = s.Cursor
 	v.cfg.save()
 	v.xcolors = map[color]*C.XftColor{}
 	v.reopenFont()
@@ -448,8 +458,13 @@ func (v *view) applyCursor() {
 		return
 	}
 	glyph := 152 // XC_fleur
+	shape := v.cfg.Cursor.Shape
+	if shape == "" {
+		// The shape of the active style is the default.
+		shape = styleCursor
+	}
 	for _, c := range cursorShapes {
-		if c.name == v.cfg.Cursor.Shape {
+		if c.name == shape {
 			glyph = c.glyph
 			break
 		}
@@ -467,22 +482,22 @@ func (v *view) applyCursor() {
 func dataFile(name string) (string, error) {
 	candidates := []string{
 		filepath.Join("data", name),
-		filepath.Join("canvas", "data", name),
+		filepath.Join("lythrum", "data", name),
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(dir, "data", name),
 			filepath.Join(dir, "..", "data", name),
-			filepath.Join(dir, "..", "share", "canvas", "data", name),
-			filepath.Join(dir, "..", "..", "share", "canvas", "data", name))
+			filepath.Join(dir, "..", "share", "lythrum", "data", name),
+			filepath.Join(dir, "..", "..", "share", "lythrum", "data", name))
 	}
 	candidates = append(candidates,
-		filepath.Join("/usr/local/share/canvas/data", name),
-		filepath.Join("/usr/share/canvas/data", name))
+		filepath.Join("/usr/local/share/lythrum/data", name),
+		filepath.Join("/usr/share/lythrum/data", name))
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates,
-			filepath.Join(home, ".local", "share", "canvas", "data", name))
+			filepath.Join(home, ".local", "share", "lythrum", "data", name))
 	}
 	for _, p := range candidates {
 		if data, err := os.ReadFile(p); err == nil {

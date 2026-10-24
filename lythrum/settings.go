@@ -451,8 +451,13 @@ func (s *settingsApp) buildCursor() {
 	for _, c := range cursorShapes {
 		names = append(names, c.name)
 	}
+	// The shape of the active style is the default.
+	shape := v.cfg.Cursor.Shape
+	if shape == "" {
+		shape = styleCursor
+	}
 	s.choice("Форма", names, func() int {
-		return indexOf(names, v.cfg.Cursor.Shape)
+		return indexOf(names, shape)
 	}, func(i int) {
 		if i < 0 || i >= len(names) {
 			return
@@ -703,8 +708,8 @@ const (
 	settingsH = 480
 )
 
-// settingsCanvas prepares the pixmap the interface is drawn into.
-func (v *view) settingsCanvas(s *settingsApp) {
+// settingsLythrum prepares the pixmap the interface is drawn into.
+func (v *view) settingsLythrum(s *settingsApp) {
 	if s.pm != 0 && s.pw == settingsW && s.ph == settingsH {
 		return
 	}
@@ -734,7 +739,7 @@ func (v *view) renderSettings() {
 		return
 	}
 	s := v.set
-	v.settingsCanvas(s)
+	v.settingsLythrum(s)
 	if s.pm == 0 {
 		return
 	}

@@ -9,7 +9,7 @@ import (
 // settings holds every preference of the shell: key bindings, pointer speeds,
 // the active style, the appearance of the widgets and the state of the system
 // services the settings app can drive. The file lives in
-// ~/.config/canvas/settings.json and is rewritten whenever something changes.
+// ~/.config/lythrum/settings.json and is rewritten whenever something changes.
 type settings struct {
 	Keybinds map[string][]string `json:"keybinds"`
 
@@ -114,7 +114,7 @@ func defaultSettings() settings {
 			Labels: true,
 			Style:  "auto",
 		},
-		Cursor: cursorSettings{Shape: "fleur"},
+		Cursor: cursorSettings{Shape: ""},
 		Clock:  clockSettings{TwentyFour: true},
 		Sound:  soundSettings{Volume: 50},
 		Screen: screenSettings{Brightness: 100},
@@ -135,10 +135,10 @@ func defaultSettings() settings {
 // settingsPath is the file the preferences are stored in.
 func settingsPath() string {
 	if base, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(base, "canvas", "settings.json")
+		return filepath.Join(base, "lythrum", "settings.json")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "canvas", "settings.json")
+	return filepath.Join(home, ".config", "lythrum", "settings.json")
 }
 
 // loadSettings reads the preferences, falling back to the defaults for every

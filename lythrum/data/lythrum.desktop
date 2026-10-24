@@ -1,16 +1,16 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Canvas
-Name[ru]=Canvas
+Name=Lythrum
+Name[ru]=Lythrum
 GenericName=Desktop Session
 GenericName[ru]=Сессия рабочего стола
-Comment=Infinite board session with application windows placed on the canvas
+Comment=Infinite board session with application windows placed on the board
 Comment[ru]=Сессия-доска: окна приложений живут прямо на холсте
-Exec=canvas --session
-TryExec=canvas
-Icon=canvas
+Exec=lythrum --session
+TryExec=lythrum
+Icon=lythrum
 Terminal=false
 NoDisplay=false
 X-GDM-SessionRegisters=true
-Keywords=Desktop;Session;Canvas;Board;Холст;Доска;ОС;
+Keywords=Desktop;Session;Lythrum;Board;Холст;Доска;ОС;

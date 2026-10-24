@@ -11,7 +11,7 @@ import (
 )
 
 // debugDND turns on the tracing of the drag and drop operations.
-var debugDND = os.Getenv("CANVAS_DEBUG_DND") == "1"
+var debugDND = os.Getenv("LYTHRUM_DEBUG_DND") == "1"
 
 // folderAt reports the folder the pointer is over while icons are being
 // dragged. The folders that are dragged themselves are ignored: a folder

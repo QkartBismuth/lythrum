@@ -8,11 +8,11 @@ package main
 // The data of a client message is a union of five longs. cgo does not expose
 // the members of the union, so the shell reads and writes them through these
 // helpers.
-static long canvas_cmsg_get(XClientMessageEvent *e, int i) {
+static long lythrum_cmsg_get(XClientMessageEvent *e, int i) {
 	return e->data.l[i];
 }
 
-static void canvas_cmsg_send(Display *dpy, Window w, Atom type,
+static void lythrum_cmsg_send(Display *dpy, Window w, Atom type,
                              long l0, long l1, long l2, long l3, long l4) {
 	XEvent ev;
 	XClientMessageEvent *ce = (XClientMessageEvent *)&ev;
@@ -29,9 +29,9 @@ static void canvas_cmsg_send(Display *dpy, Window w, Atom type,
 	XSendEvent(dpy, w, False, 0, &ev);
 }
 
-// canvas_selection_notify tells a client that its request for the selection
+// lythrum_selection_notify tells a client that its request for the selection
 // is answered.
-static void canvas_selection_notify(Display *dpy, Window requestor,
+static void lythrum_selection_notify(Display *dpy, Window requestor,
                                     Atom selection, Atom target,
                                     Atom property, Time time) {
 	XEvent ev;
@@ -162,12 +162,12 @@ func (v *view) xdndTypeList(source C.Window) C.Atom {
 func (v *view) onXDND(ce *C.XClientMessageEvent) bool {
 	switch ce.message_type {
 	case atomXdndEnter:
-		source := C.Window(C.canvas_cmsg_get(ce, 0))
-		version := int(C.canvas_cmsg_get(ce, 1))
+		source := C.Window(C.lythrum_cmsg_get(ce, 0))
+		version := int(C.lythrum_cmsg_get(ce, 1))
 		if version > 5 {
 			version = 5
 		}
-		typ := C.Atom(C.canvas_cmsg_get(ce, 3))
+		typ := C.Atom(C.lythrum_cmsg_get(ce, 3))
 		if typ == 0 {
 			typ = v.xdndTypeList(source)
 		}
@@ -182,7 +182,7 @@ func (v *view) onXDND(ce *C.XClientMessageEvent) bool {
 		if !v.xdn.active {
 			return true
 		}
-		pos := uint32(C.canvas_cmsg_get(ce, 2))
+		pos := uint32(C.lythrum_cmsg_get(ce, 2))
 		v.xdn.rootX = int((pos >> 16) & 0xffff)
 		v.xdn.rootY = int(pos & 0xffff)
 		v.xdn.accepted = true
@@ -197,12 +197,12 @@ func (v *view) onXDND(ce *C.XClientMessageEvent) bool {
 			return true
 		}
 		// Ask the source for the list of the files it drags.
-		prop := C.XInternAtom(v.dpy, cstr("CANVAS_XDND_DROP"), C.False)
+		prop := C.XInternAtom(v.dpy, cstr("LYTHRUM_XDND_DROP"), C.False)
 		v.xdn.prop = prop
 		v.xdn.waiting = true
-		v.xdn.dropTime = C.Time(C.canvas_cmsg_get(ce, 2))
+		v.xdn.dropTime = C.Time(C.lythrum_cmsg_get(ce, 2))
 		C.XConvertSelection(v.dpy, atomXdndSelection, v.xdn.typ, prop, v.win,
-			C.Time(C.canvas_cmsg_get(ce, 2)))
+			C.Time(C.lythrum_cmsg_get(ce, 2)))
 		C.XFlush(v.dpy)
 		if debugDND {
 			fmt.Println("dnd: drop, waiting for the selection")
@@ -228,7 +228,7 @@ func (v *view) xdndStatus() {
 	if v.xdn.accepted {
 		action = 1 // XdndActionCopy
 	}
-	C.canvas_cmsg_send(v.dpy, v.xdn.source, atomXdndStatus,
+	C.lythrum_cmsg_send(v.dpy, v.xdn.source, atomXdndStatus,
 		C.long(v.xdn.source), C.long(v.win), action,
 		C.long((x<<16)|(y&0xffff)), C.long(((x+40)<<16)|((y+40)&0xffff)))
 	C.XFlush(v.dpy)
@@ -243,7 +243,7 @@ func (v *view) xdndFinish(ok bool) {
 	if ok {
 		result = 0
 	}
-	C.canvas_cmsg_send(v.dpy, v.xdn.source, atomXdndFinished,
+	C.lythrum_cmsg_send(v.dpy, v.xdn.source, atomXdndFinished,
 		C.long(v.xdn.source), result, C.long(v.xdn.dropTime), 0, 0)
 	C.XFlush(v.dpy)
 	v.xdn = xdndState{}
@@ -336,13 +336,13 @@ func (v *view) xdndMove(rx, ry int) {
 	target := v.xdndTarget(rx, ry)
 	if target != v.xds.target {
 		if v.xds.target != 0 {
-			C.canvas_cmsg_send(v.dpy, v.xds.target, atomXdndLeave,
+			C.lythrum_cmsg_send(v.dpy, v.xds.target, atomXdndLeave,
 				C.long(v.xds.target), 0, 0, 0, 0)
 		}
 		v.xds.target = target
 		v.xds.accepted = false
 		if target != 0 {
-			C.canvas_cmsg_send(v.dpy, target, atomXdndEnter,
+			C.lythrum_cmsg_send(v.dpy, target, atomXdndEnter,
 				C.long(target), 0, 0, C.long(atomUriList), C.CurrentTime)
 		}
 		C.XFlush(v.dpy)
@@ -354,7 +354,7 @@ func (v *view) xdndMove(rx, ry int) {
 	if v.xds.accepted {
 		action = 1 // XdndActionCopy
 	}
-	C.canvas_cmsg_send(v.dpy, v.xds.target, atomXdndPosition,
+	C.lythrum_cmsg_send(v.dpy, v.xds.target, atomXdndPosition,
 		C.long(v.xds.target), 0, C.long((rx<<16)|(ry&0xffff)), action,
 		C.CurrentTime)
 	C.XFlush(v.dpy)
@@ -366,7 +366,7 @@ func (v *view) xdndRelease(rx, ry int) {
 		return
 	}
 	if v.xds.target != 0 {
-		C.canvas_cmsg_send(v.dpy, v.xds.target, atomXdndDrop,
+		C.lythrum_cmsg_send(v.dpy, v.xds.target, atomXdndDrop,
 			C.long(v.xds.target), 0, C.long((rx<<16)|(ry&0xffff)),
 			C.CurrentTime, 0)
 		C.XFlush(v.dpy)
@@ -381,7 +381,7 @@ func (v *view) xdndStatusIn(ce *C.XClientMessageEvent) {
 	if !v.xds.active {
 		return
 	}
-	v.xds.accepted = C.canvas_cmsg_get(ce, 2) != 0
+	v.xds.accepted = C.lythrum_cmsg_get(ce, 2) != 0
 }
 
 // xdndFinishedIn is the end of the drop: the target is done with the files.
@@ -389,7 +389,7 @@ func (v *view) xdndFinishedIn(ce *C.XClientMessageEvent) {
 	if !v.xds.active {
 		return
 	}
-	ok := C.canvas_cmsg_get(ce, 1) == 0
+	ok := C.lythrum_cmsg_get(ce, 1) == 0
 	v.xdndStop()
 	if ok {
 		v.setStatus(fmt.Sprintf("Передано файлов: %d", len(v.xds.paths)))
@@ -423,7 +423,7 @@ func (v *view) onSelectionRequest(sr *C.XSelectionRequestEvent) {
 	C.XChangeProperty(v.dpy, sr.target, prop, atomUriList, 8,
 		C.PropModeReplace, (*C.uchar)(unsafe.Pointer(cs)), C.int(len(text)))
 	C.free(unsafe.Pointer(cs))
-	C.canvas_selection_notify(v.dpy, sr.requestor, sr.selection,
+	C.lythrum_selection_notify(v.dpy, sr.requestor, sr.selection,
 		sr.target, prop, sr.time)
 	C.XFlush(v.dpy)
 }

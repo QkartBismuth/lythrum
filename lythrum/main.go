@@ -1,4 +1,4 @@
-// Command canvas is a small X11 board built on cgo and libX11. The board is an
+// Command lythrum is a small X11 board built on cgo and libX11. The board is an
 // infinite grid holding shortcuts to the contents of the desktop folder. The
 // viewport pans and zooms over it with the mouse, wheel or keyboard.
 package main
@@ -19,81 +19,81 @@ package main
 #include <X11/extensions/Xdamage.h>
 
 // The last protocol error the shell ran into.
-static int canvas_last_error = 0;
+static int lythrum_last_error = 0;
 
-// canvas_expose asks an application to paint its window again.
-static void canvas_expose(Display *dpy, Window w);
+// lythrum_expose asks an application to paint its window again.
+static void lythrum_expose(Display *dpy, Window w);
 
 // The major opcode of the composite extension, and whether the server refused
 // to redirect a window into a pixmap.
-static int canvas_composite_opcode = -1;
-static int canvas_render_opcode = -1;
-static int canvas_no_composite = 0;
+static int lythrum_composite_opcode = -1;
+static int lythrum_render_opcode = -1;
+static int lythrum_no_composite = 0;
 
-// canvas_xerror keeps the default Xlib handler from terminating the whole
+// lythrum_xerror keeps the default Xlib handler from terminating the whole
 // session on a recoverable protocol error (e.g. a key already grabbed by
 // someone else). Real errors are still reported on stderr.
-static int canvas_xerror(Display *dpy, XErrorEvent *ev) {
-	canvas_last_error = ev->error_code;
+static int lythrum_xerror(Display *dpy, XErrorEvent *ev) {
+	lythrum_last_error = ev->error_code;
 	// A window that cannot be redirected into a pixmap cannot be shown as a
 	// miniature: the board draws it as it is. Under a compositor the server
 	// refuses to redirect the windows of the clients a second time.
-	if ((canvas_composite_opcode >= 0 && ev->request_code == canvas_composite_opcode) ||
-	    (canvas_render_opcode >= 0 && ev->request_code == canvas_render_opcode)) {
-		canvas_no_composite = 1;
+	if ((lythrum_composite_opcode >= 0 && ev->request_code == lythrum_composite_opcode) ||
+	    (lythrum_render_opcode >= 0 && ev->request_code == lythrum_render_opcode)) {
+		lythrum_no_composite = 1;
 	}
 	if (ev->error_code != BadAccess) {
 		char buf[256];
 		XGetErrorText(dpy, ev->error_code, buf, sizeof buf);
-		fprintf(stderr, "canvas: X error: %s (request %d)\n", buf, ev->request_code);
+		fprintf(stderr, "lythrum: X error: %s (request %d)\n", buf, ev->request_code);
 	}
 	return 0;
 }
-static void canvas_ignore_badaccess(void) {
-	XSetErrorHandler(canvas_xerror);
+static void lythrum_ignore_badaccess(void) {
+	XSetErrorHandler(lythrum_xerror);
 }
-static void canvas_destroy_image(XImage *img) { XDestroyImage(img); }
+static void lythrum_destroy_image(XImage *img) { XDestroyImage(img); }
 
 // The rendering of a window can be sent into a pixmap, which the board then
 // draws scaled in the frame of the window. Not every server allows it.
 // The board needs the number of the composite extension to recognise the
 // errors of the redirection.
-static void canvas_set_composite_opcode(Display *dpy) {
+static void lythrum_set_composite_opcode(Display *dpy) {
 	int major = 0, event_base = 0, error_base = 0;
 	if (XQueryExtension(dpy, "Composite", &major, &event_base, &error_base)) {
-		canvas_composite_opcode = major;
+		lythrum_composite_opcode = major;
 	}
 	if (XQueryExtension(dpy, "RENDER", &major, &event_base, &error_base)) {
-		canvas_render_opcode = major;
+		lythrum_render_opcode = major;
 	}
 }
 
 // The board gives up on the miniature when the server refuses to redirect a
 // window into a pixmap.
-static int canvas_composite_broken(void) {
-	return canvas_no_composite;
+static int lythrum_composite_broken(void) {
+	return lythrum_no_composite;
 }
 
-static int canvas_redirect(Display *dpy, Window win) {
-	canvas_last_error = 0;
+static int lythrum_redirect(Display *dpy, Window win) {
+	lythrum_last_error = 0;
 	// A single window is redirected: the server refuses to redirect the
 	// subwindows of a window automatically. The server does not paint the
 	// window on the screen: the board draws the content of the application
 	// itself, in the frame of the window on the canvas.
 	XCompositeRedirectWindow(dpy, win, False);
 	XSync(dpy, False);
-	if (canvas_last_error == 0 && !canvas_no_composite) {
+	if (lythrum_last_error == 0 && !lythrum_no_composite) {
 		// The application has to paint its window again: a redirected
 		// window keeps no content of its own.
-		canvas_expose(dpy, win);
+		lythrum_expose(dpy, win);
 	}
-	return canvas_last_error == 0 && !canvas_no_composite;
+	return lythrum_last_error == 0 && !lythrum_no_composite;
 }
 
-// canvas_container creates the container that holds a managed window. The
+// lythrum_container creates the container that holds a managed window. The
 // window has no background of its own: the miniature the board paints shows
 // through it, and the application is clipped by its edges.
-static Window canvas_container(Display *dpy, Window parent, unsigned w,
+static Window lythrum_container(Display *dpy, Window parent, unsigned w,
                                unsigned h) {
 	XSetWindowAttributes attr;
 	memset(&attr, 0, sizeof(attr));
@@ -111,10 +111,10 @@ static Window canvas_container(Display *dpy, Window parent, unsigned w,
 	                     CWBorderPixel | CWEventMask | CWOverrideRedirect |
 	                     CWBackPixmap, &attr);
 }
-// canvas_expose asks an application to paint its window again. A redirected
+// lythrum_expose asks an application to paint its window again. A redirected
 // window keeps no content of its own: the application has to draw it once
 // more, or the board would show what was on the screen before.
-static void canvas_expose(Display *dpy, Window w) {
+static void lythrum_expose(Display *dpy, Window w) {
 	XWindowAttributes attr;
 	XEvent ev;
 	XExposeEvent *ex = (XExposeEvent *)&ev;
@@ -258,16 +258,16 @@ type managedWin struct {
 
 	vis *C.Visual // the application's visual, for its render picture
 
-	// Content miniature: the window is redirected by the composite extension,
-	// so its pixels render into a backing pixmap while the real window stays
-	// hidden outside the container's clip. drawWins composites the backing
-	// pixmap scaled into the board pixmap, and the application itself is never
-	// resized: it reflows nothing and keeps its live state.
+	// Content: the window is redirected by the composite extension, so its
+	// pixels render into a backing pixmap while the real window stays hidden
+	// outside the container's clip. drawContent paints the backing pixmap at
+	// its own pixel size, and the application itself is never resized: it
+	// reflows nothing and keeps its live state.
 	virtual    bool      // the shell draws the window itself, it has no X window
 	widget     bool      // the window holds a widget of the shell
 	widgetKind string    // the kind of the widget: clock, calendar, control…
 	widgetXID  C.ulong   // the window of the toolkit behind it
-	tmb        bool      // true when the frame is smaller than the app (miniature)
+	tmb        bool      // true when the frame no longer covers the whole app
 	redir      bool      // the rendering of the app goes into a pixmap
 	float      bool      // the window is not inside the board, it floats over it
 	cpm        C.Pixmap  // the backing pixmap the miniature is drawn from
@@ -468,7 +468,7 @@ type view struct {
 // protocol error (a key already grabbed by someone else) from killing the
 // session.
 func xIgnoreBadAccess() {
-	C.canvas_ignore_badaccess()
+	C.lythrum_ignore_badaccess()
 }
 
 func main() {
@@ -480,7 +480,7 @@ func main() {
 
 	dpy := C.XOpenDisplay(nil)
 	if dpy == nil {
-		fmt.Fprintln(os.Stderr, "canvas: cannot open display; is DISPLAY set?")
+		fmt.Fprintln(os.Stderr, "lythrum: cannot open display; is DISPLAY set?")
 		os.Exit(1)
 	}
 
@@ -496,9 +496,9 @@ func main() {
 		}
 	}
 	if session {
-		os.Setenv("XDG_CURRENT_DESKTOP", "Canvas")
-		os.Setenv("XDG_SESSION_DESKTOP", "canvas")
-		os.Setenv("DESKTOP_SESSION", "canvas")
+		os.Setenv("XDG_CURRENT_DESKTOP", "Lythrum")
+		os.Setenv("XDG_SESSION_DESKTOP", "lythrum")
+		os.Setenv("DESKTOP_SESSION", "lythrum")
 	}
 
 	// A bare X session has no desktop environment to manage keyboard layouts,
@@ -523,7 +523,7 @@ func main() {
 		C.XWhitePixel(dpy, screen),
 	)
 	if win == 0 {
-		fmt.Fprintln(os.Stderr, "canvas: cannot create window")
+		fmt.Fprintln(os.Stderr, "lythrum: cannot create window")
 		os.Exit(1)
 	}
 
@@ -568,20 +568,17 @@ func main() {
 	v.gesturesInit()
 	v.xftFont = C.XftFontOpenName(dpy, screen, C.CString("sans:size=10"))
 	if v.xftFont == nil {
-		fmt.Fprintln(os.Stderr, "canvas: xft font unavailable, falling back to core text")
-	}
-	if cur := C.XCreateFontCursor(dpy, C.XC_fleur); cur != 0 {
-		C.XDefineCursor(dpy, win, cur)
+		fmt.Fprintln(os.Stderr, "lythrum: xft font unavailable, falling back to core text")
 	}
 
 	// A second connection lets background goroutines wake the event loop with
 	// a minimal event without sharing the main display across threads.
 	wakeDpy = C.XOpenDisplay(nil)
 	if wakeDpy == nil {
-		fmt.Fprintln(os.Stderr, "canvas: no secondary display, background work wakes on the next event only")
+		fmt.Fprintln(os.Stderr, "lythrum: no secondary display, background work wakes on the next event only")
 	} else {
 		wakeWin = win
-		wakeAtom = C.XInternAtom(wakeDpy, C.CString("CANVAS_WAKE"), C.False)
+		wakeAtom = C.XInternAtom(wakeDpy, C.CString("LYTHRUM_WAKE"), C.False)
 	}
 	v.startThumbWorkers()
 	startAnimTicker()
@@ -601,7 +598,7 @@ func main() {
 	// board must refresh its miniature.
 	v.bootComposite()
 
-	v.root = os.Getenv("CANVAS_DIR")
+	v.root = os.Getenv("LYTHRUM_DIR")
 	if v.root == "" {
 		v.root = desktopDir()
 	}
@@ -633,13 +630,13 @@ func main() {
 	fmt.Println("  shift+tab switches between open windows, alt+f4 closes the active one")
 	fmt.Println("  drop a file on a folder to move it inside")
 	if session {
-		fmt.Printf("session: Canvas desktop, apps=%q\n", os.Getenv("CANVAS_SESSION_APPS"))
+		fmt.Printf("session: Lythrum desktop, apps=%q\n", os.Getenv("LYTHRUM_SESSION_APPS"))
 		v.startSession()
 	}
 
 	v.paint()
 	v.blit()
-	if os.Getenv("CANVAS_DEBUG_ICONS") == "1" {
+	if os.Getenv("LYTHRUM_DEBUG_ICONS") == "1" {
 		for i, ic := range v.icons {
 			fmt.Printf("icon %d %q at %d,%d size %d,%d\n", i, ic.name,
 				v.sx(ic.x)+int(ic.w*v.zoom/2), v.sy(ic.y)+int(ic.h*v.zoom/2),
@@ -709,7 +706,7 @@ func (v *view) redirPainted(d C.Drawable) {
 
 // redirectNow redirects a window and hands its content to the board.
 func (v *view) redirectNow(win C.Window) {
-	if C.canvas_redirect(v.dpy, win) == 0 {
+	if C.lythrum_redirect(v.dpy, win) == 0 {
 		return
 	}
 	for i := range v.wins {
@@ -1077,7 +1074,7 @@ func (v *view) applyBand() {
 }
 
 func (v *view) beginIconDrag() {
-	if os.Getenv("CANVAS_DEBUG_DND") == "1" {
+	if os.Getenv("LYTHRUM_DEBUG_DND") == "1" {
 		fmt.Printf("dnd: drag begin at %d,%d\n", v.pressX, v.pressY)
 	}
 	if !v.selset[v.pressed] {
@@ -1111,7 +1108,7 @@ func (v *view) endIconDrag() {
 	C.XUngrabPointer(v.dpy, C.CurrentTime)
 	target := v.dropTarget
 	v.dropTarget = -1
-	if os.Getenv("CANVAS_DEBUG_DND") == "1" {
+	if os.Getenv("LYTHRUM_DEBUG_DND") == "1" {
 		fmt.Printf("dnd: drag end, target %d\n", target)
 	}
 	if target >= 0 {
@@ -1281,7 +1278,7 @@ func (v *view) onMotion(me *C.XMotionEvent) {
 
 func (v *view) onKey(ke *C.XKeyEvent) {
 	ks := C.XLookupKeysym(ke, 0)
-	if os.Getenv("CANVAS_DEBUG_KEYS") == "1" {
+	if os.Getenv("LYTHRUM_DEBUG_KEYS") == "1" {
 		fmt.Printf("key: state=0x%x keysym=0x%x\n", ke.state, uint(ks))
 	}
 	if v.promptOn {
@@ -1338,7 +1335,7 @@ func (v *view) onKey(ke *C.XKeyEvent) {
 // brings the board back to its centre.
 func (v *view) onKeyRelease(ke *C.XKeyEvent) {
 	ks := uint32(C.XLookupKeysym(ke, 0))
-	if os.Getenv("CANVAS_DEBUG_KEYS") == "1" {
+	if os.Getenv("LYTHRUM_DEBUG_KEYS") == "1" {
 		fmt.Printf("key up: state=0x%x keysym=0x%x\n", ke.state, uint(ks))
 	}
 	if ks != ksSuperL && ks != ksSuperR {
@@ -1354,7 +1351,7 @@ func (v *view) onKeyRelease(ke *C.XKeyEvent) {
 		return
 	}
 	if v.actionFor(ks, 0) == actCenter {
-		if os.Getenv("CANVAS_DEBUG_KEYS") == "1" {
+		if os.Getenv("LYTHRUM_DEBUG_KEYS") == "1" {
 			fmt.Println("action: center")
 		}
 		v.centerOrigin()
@@ -2254,7 +2251,7 @@ func (v *view) reload(reset bool) {
 
 	ents, err := os.ReadDir(v.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: readdir:", err)
+		fmt.Fprintln(os.Stderr, "lythrum: readdir:", err)
 	}
 	pos := loadPositions(v.root)
 	var dirs, files, apps []boardIcon
@@ -2399,7 +2396,7 @@ func positionsPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "canvas", "positions.json")
+	return filepath.Join(dir, "lythrum", "positions.json")
 }
 
 func loadPositions(root string) map[string][2]float64 {
@@ -2456,13 +2453,13 @@ func (v *view) launchTerminal() {
 	cx := v.ox + float64(v.w)/(2*v.zoom)
 	cy := v.oy + float64(v.h)/(2*v.zoom)
 	var argv []string
-	if t := os.Getenv("CANVAS_TERMINAL"); t != "" {
+	if t := os.Getenv("LYTHRUM_TERMINAL"); t != "" {
 		argv = strings.Fields(t)
 	} else {
 		argv = terminalCommand()
 	}
 	if len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "canvas: no terminal found")
+		fmt.Fprintln(os.Stderr, "lythrum: no terminal found")
 		return
 	}
 	v.spawn(argv, cx, cy)
@@ -2505,18 +2502,18 @@ func (v *view) spawn(argv []string, cx, cy float64) {
 	cmd.Dir = v.root
 	if err := cmd.Start(); err != nil {
 		v.pending = nil
-		fmt.Fprintln(os.Stderr, "canvas: launch:", err)
+		fmt.Fprintln(os.Stderr, "lythrum: launch:", err)
 		return
 	}
 	go func() { _ = cmd.Wait() }()
-	fmt.Printf("canvas: launched %s\n", strings.Join(argv, " "))
+	fmt.Printf("lythrum: launched %s\n", strings.Join(argv, " "))
 }
 
-// startSession fills a freshly started desktop session: CANVAS_SESSION_APPS
+// startSession fills a freshly started desktop session: LYTHRUM_SESSION_APPS
 // lists the programs to open (one per ';'), and with no list a terminal opens
 // so the board is immediately usable.
 func (v *view) startSession() {
-	apps := strings.TrimSpace(os.Getenv("CANVAS_SESSION_APPS"))
+	apps := strings.TrimSpace(os.Getenv("LYTHRUM_SESSION_APPS"))
 	if apps == "" {
 		v.launchTerminal()
 		return
@@ -2539,7 +2536,7 @@ func (v *view) startSession() {
 func (v *view) restart() {
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: restart:", err)
+		fmt.Fprintln(os.Stderr, "lythrum: restart:", err)
 		return
 	}
 	C.XCloseDisplay(v.dpy)
@@ -2547,7 +2544,7 @@ func (v *view) restart() {
 	cmd.Env = os.Environ()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: restart:", err)
+		fmt.Fprintln(os.Stderr, "lythrum: restart:", err)
 		os.Exit(1)
 	}
 	os.Exit(0)
@@ -2556,11 +2553,11 @@ func (v *view) restart() {
 // filemanCommand returns the command of the file manager of the shell, or
 // nothing when it is not installed.
 func filemanCommand(dir string) []string {
-	names := []string{"canvas-fileman", "fileman"}
+	names := []string{"lythrum-fileman", "fileman"}
 	if exe, err := os.Executable(); err == nil {
 		home := filepath.Dir(exe)
 		names = append([]string{filepath.Join(home, "fileman"),
-			filepath.Join(home, "canvas-fileman")}, names...)
+			filepath.Join(home, "lythrum-fileman")}, names...)
 	}
 	for _, n := range names {
 		if p, err := exec.LookPath(n); err == nil {
@@ -2570,11 +2567,11 @@ func filemanCommand(dir string) []string {
 	return nil
 }
 
-// appCommand prefers a real file manager for folders; CANVAS_FILEMANAGER can
+// appCommand prefers a real file manager for folders; LYTHRUM_FILEMANAGER can
 // override it (useful for testing without a desktop session).
 func appCommand(target string, isDir bool) []string {
 	if isDir {
-		if fm := os.Getenv("CANVAS_FILEMANAGER"); fm != "" {
+		if fm := os.Getenv("LYTHRUM_FILEMANAGER"); fm != "" {
 			return append(strings.Fields(fm), target)
 		}
 		// The file manager of the shell comes first: it lives on the board
@@ -2597,15 +2594,15 @@ func appCommand(target string, isDir bool) []string {
 }
 
 // keyboardConfig reads the XKB setup for a board session. An empty
-// CANVAS_XKB_LAYOUT disables it; the defaults give US + Russian with two
+// LYTHRUM_XKB_LAYOUT disables it; the defaults give US + Russian with two
 // common toggle keys.
 func keyboardConfig() (layout, variant, options string) {
-	layout = os.Getenv("CANVAS_XKB_LAYOUT")
+	layout = os.Getenv("LYTHRUM_XKB_LAYOUT")
 	if layout == "" {
 		layout = "us,ru"
 	}
-	variant = os.Getenv("CANVAS_XKB_VARIANT")
-	options = os.Getenv("CANVAS_XKB_OPTIONS")
+	variant = os.Getenv("LYTHRUM_XKB_VARIANT")
+	options = os.Getenv("LYTHRUM_XKB_OPTIONS")
 	if options == "" {
 		options = "grp:alt_shift_toggle,grp:win_space_toggle"
 	}
@@ -2620,7 +2617,7 @@ func applyKeyboard(layout, variant, options string) bool {
 	}
 	bin, err := exec.LookPath("setxkbmap")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: setxkbmap not found, keyboard layouts left alone")
+		fmt.Fprintln(os.Stderr, "lythrum: setxkbmap not found, keyboard layouts left alone")
 		return false
 	}
 	args := []string{"-layout", layout}
@@ -2631,10 +2628,10 @@ func applyKeyboard(layout, variant, options string) bool {
 		args = append(args, "-option", options)
 	}
 	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "canvas: setxkbmap: %v: %s\n", err, strings.TrimSpace(string(out)))
+		fmt.Fprintf(os.Stderr, "lythrum: setxkbmap: %v: %s\n", err, strings.TrimSpace(string(out)))
 		return false
 	}
-	fmt.Printf("canvas: keyboard layouts %s (%s)\n", layout, options)
+	fmt.Printf("lythrum: keyboard layouts %s (%s)\n", layout, options)
 	return true
 }
 
@@ -2818,7 +2815,7 @@ func (v *view) adopt(win C.Window, cx, cy float64) {
 	if attr.override_redirect != 0 || attr.width == 0 || attr.height == 0 {
 		return
 	}
-	// The frame of the window is a plane of the canvas: its size is fixed
+	// The frame of the window is a plane of the lythrum: its size is fixed
 	// in board units (the pixels of the application) and it scales with the
 	// zoom of the board, like every other object of the canvas.
 	bw := float64(attr.width)
@@ -2826,7 +2823,7 @@ func (v *view) adopt(win C.Window, cx, cy float64) {
 	// Containers clip the application to the frame: the app keeps its own
 	// pixel size, the viewport only scales the frame around it. The container
 	// has no background, so the miniature the board paints shows through it.
-	cont := C.canvas_container(v.dpy, v.win, C.uint(attr.width),
+	cont := C.lythrum_container(v.dpy, v.win, C.uint(attr.width),
 		C.uint(attr.height))
 	C.XMapWindow(v.dpy, cont)
 	// The application can render into a pixmap, which the board then draws
@@ -2834,7 +2831,7 @@ func (v *view) adopt(win C.Window, cx, cy float64) {
 	// compositor the windows of the clients are already redirected, and the
 	// window then has to stay a window of its own, floating over the board.
 	redir := false
-	if C.canvas_redirect(v.dpy, win) != 0 && C.canvas_composite_broken() == 0 {
+	if C.lythrum_redirect(v.dpy, win) != 0 && C.lythrum_composite_broken() == 0 {
 		// The application is redirected a moment later: it has to paint
 		// itself before the redirect, or the board would keep what was on
 		// the screen instead of the content of the application.
@@ -2883,7 +2880,7 @@ func (v *view) adopt(win C.Window, cx, cy float64) {
 	v.capWin(&v.wins[len(v.wins)-1])
 	v.placeWindows()
 	v.redraw = true
-	fmt.Printf("canvas: adopted window 0x%x %dx%d\n", uint64(win), attr.width, attr.height)
+	fmt.Printf("lythrum: adopted window 0x%x %dx%d\n", uint64(win), attr.width, attr.height)
 }
 
 func (v *view) forget(win C.Window) {
@@ -2968,16 +2965,15 @@ func (v *view) gripPx() int {
 // paints: the application is redirected, so the server keeps no content of
 // its own and the board draws the application in its frame.
 func (v *view) winMini(w *managedWin) bool {
-	return w.redir && C.canvas_composite_broken() == 0
+	return w.redir && C.lythrum_composite_broken() == 0
 }
 
 // placeWindows keeps every managed window frame pinned to its board position
 // and scaled to its board size times the viewport zoom: frames follow the
-// canvas exactly like the icons do. When the frame shrinks past the
-// application's own size the content would clip, so the window turns into a
-// miniature: the real window hides outside the container's clip and the board
-// composites a scaled copy of it. When the frame grows back (viewport zoomed
-// in) the application returns live into the frame's top-left corner.
+// canvas exactly like the icons do. The content inside the frame does not
+// scale with it: the redirected application stays parked in the container's
+// top-left corner at its own pixel size, the board paints it one to one, and
+// the container clips whatever does not fit.
 func (v *view) placeWindows() {
 	changed := false
 	for i := range v.wins {
@@ -3032,16 +3028,16 @@ func (v *view) placeWindows() {
 func (v *view) bootComposite() {
 	var cmajor, cminor C.int
 	if C.XCompositeQueryVersion(v.dpy, &cmajor, &cminor) != C.True {
-		fmt.Fprintln(os.Stderr, "canvas: composite extension unavailable, windows clip instead of scaling")
+		fmt.Fprintln(os.Stderr, "lythrum: composite extension unavailable, windows clip instead of scaling")
 		return
 	}
-	C.canvas_set_composite_opcode(v.dpy)
+	C.lythrum_set_composite_opcode(v.dpy)
 	// The redirect is verified lazily: XCompositeNameWindowPixmap in childBrush
 	// skips miniatures whose backing pixmap cannot be fetched.
 	v.compOK = true
 	var dmajor, dminor C.int
 	if C.XDamageQueryVersion(v.dpy, &dmajor, &dminor) != C.True {
-		fmt.Fprintln(os.Stderr, "canvas: damage extension unavailable, miniatures refresh on redraw only")
+		fmt.Fprintln(os.Stderr, "lythrum: damage extension unavailable, miniatures refresh on redraw only")
 		return
 	}
 	v.dmgOK = true
@@ -3078,9 +3074,10 @@ func (v *view) childBrush(w *managedWin) {
 }
 
 // drawContent paints the content of an application in its frame. The frame is
-// a plane of the canvas: the content of the application is scaled to fill it,
-// so the window grows and shrinks with the zoom of the board, like every
-// other object of the canvas.
+// a plane of the lythrum and scales with the zoom of the board, but the
+// content does not: it is painted at the size the application itself renders,
+// one screen pixel per application pixel. Whatever falls outside the frame is
+// clipped.
 func (v *view) drawContent(w *managedWin) {
 	if w.virtual {
 		return
@@ -3094,17 +3091,18 @@ func (v *view) drawContent(w *managedWin) {
 	if sw <= 0 || sh <= 0 || awn <= 0 || ahn <= 0 {
 		return
 	}
-	// The transform of a picture maps the place of the destination to the
-	// place of the source: the content is scaled to fill the frame.
-	var t C.XTransform
-	t.matrix[0][0] = C.int(int64(awn) * 65536 / int64(sw))
-	t.matrix[1][1] = C.int(int64(ahn) * 65536 / int64(sh))
-	t.matrix[2][2] = 1 << 16
-	C.XRenderSetPictureTransform(v.dpy, w.cpic, &t)
-	C.XRenderSetPictureFilter(v.dpy, w.cpic, C.CString("bilinear"), nil, 0)
+	// The content is copied one to one, without a transform: the zoom moves
+	// the frame, it never scales the pixels of the application.
+	cw, ch := sw, sh
+	if cw > awn {
+		cw = awn
+	}
+	if ch > ahn {
+		ch = ahn
+	}
 	C.XRenderComposite(v.dpy, C.PictOpSrc, w.cpic, 0, v.dpict,
 		0, 0, 0, 0,
-		C.int(x), C.int(y), C.uint(sw), C.uint(sh))
+		C.int(x), C.int(y), C.uint(cw), C.uint(ch))
 }
 
 // watchDir reports changes of the desktop folder, so files added from outside
@@ -3113,13 +3111,13 @@ func (v *view) drawContent(w *managedWin) {
 func watchDir(root string, out chan<- int) {
 	fd, err := syscall.InotifyInit1(0)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: inotify:", err)
+		fmt.Fprintln(os.Stderr, "lythrum: inotify:", err)
 		return
 	}
 	mask := syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_TO |
 		syscall.IN_MOVED_FROM | syscall.IN_CLOSE_WRITE | syscall.IN_MOVED_TO
 	if _, err := syscall.InotifyAddWatch(fd, root, uint32(mask)); err != nil {
-		fmt.Fprintln(os.Stderr, "canvas: inotify add:", err)
+		fmt.Fprintln(os.Stderr, "lythrum: inotify add:", err)
 		return
 	}
 	buf := make([]byte, 4096)
@@ -3206,14 +3204,23 @@ func (v *view) stopWinDrag() { // Clamp the frame only now: during the resize it
 
 // contentWinAt reports the index of the window whose content lies under the
 // screen point, or -1. The content of an application is a picture the board
-// paints: the pointer belongs to the application, not to the board.
+// paints: the pointer belongs to the application, not to the board. Only the
+// part of the content the frame shows counts: the frame may be larger than
+// the application when the board is zoomed in.
 func (v *view) contentWinAt(x, y int) int {
 	for i := len(v.wins) - 1; i >= 0; i-- {
 		w := &v.wins[i]
-		if !w.redir || C.canvas_composite_broken() != 0 {
+		if !w.redir || C.lythrum_composite_broken() != 0 {
 			continue
 		}
 		fx, fy, fw, fh := v.winRect(w)
+		awn, ahn := int(math.Round(w.aw)), int(math.Round(w.ah))
+		if fw > awn {
+			fw = awn
+		}
+		if fh > ahn {
+			fh = ahn
+		}
 		if x >= fx && x < fx+fw && y >= fy && y < fy+fh {
 			return i
 		}
@@ -3222,19 +3229,13 @@ func (v *view) contentWinAt(x, y int) int {
 }
 
 // thumbLocal maps a point on the content of a window to the corresponding
-// point of the application's real window. The content is scaled to fill the
-// frame, so the point is scaled back.
+// point of the application's real window. The content is painted at its own
+// pixel size, so the point only moves by the offset of the frame.
 func (v *view) thumbLocal(w *managedWin, x, y int) (lx, ly int) {
-	fx, fy, fw, fh := v.winRect(w)
+	fx, fy, _, _ := v.winRect(w)
 	awn, ahn := int(math.Round(w.aw)), int(math.Round(w.ah))
-	if fw < 1 {
-		fw = 1
-	}
-	if fh < 1 {
-		fh = 1
-	}
-	lx = int((float64(x-fx) * float64(awn) / float64(fw)) + 0.5)
-	ly = int((float64(y-fy) * float64(ahn) / float64(fh)) + 0.5)
+	lx = x - fx
+	ly = y - fy
 	if lx < 0 {
 		lx = 0
 	}
@@ -3563,7 +3564,7 @@ func (v *view) resize(w, h int) {
 	}
 	v.pm = C.XCreatePixmap(v.dpy, v.win, C.uint(w), C.uint(h), v.depth)
 	if v.pm == 0 {
-		fmt.Fprintln(os.Stderr, "canvas: cannot create pixmap")
+		fmt.Fprintln(os.Stderr, "lythrum: cannot create pixmap")
 		os.Exit(1)
 	}
 	v.xftDraw = C.XftDrawCreate(v.dpy, C.Drawable(v.pm), v.visual, v.cmap)
@@ -4368,7 +4369,7 @@ func thumbsCache() string {
 		home, _ := os.UserHomeDir()
 		base = filepath.Join(home, ".cache")
 	}
-	return filepath.Join(base, "canvas", "thumbs")
+	return filepath.Join(base, "lythrum", "thumbs")
 }
 
 // thumbToImage builds the cached thumbnail with external tools and decodes
@@ -4438,7 +4439,7 @@ func (v *view) thumbEnsure(sz int) bool {
 		ncap = 128
 	}
 	if v.thumbImg != nil {
-		C.canvas_destroy_image(v.thumbImg)
+		C.lythrum_destroy_image(v.thumbImg)
 		v.thumbImg = nil
 	}
 	data := C.malloc(C.size_t(ncap) * C.size_t(ncap) * 4)
@@ -4627,7 +4628,7 @@ func (v *view) clearWallpaper(status string) {
 	}
 	v.wall = nil
 	if v.wallImg != nil {
-		C.canvas_destroy_image(v.wallImg)
+		C.lythrum_destroy_image(v.wallImg)
 		v.wallImg = nil
 		v.wallW, v.wallH = 0, 0
 	}
@@ -4641,7 +4642,7 @@ func (v *view) clearWallpaper(status string) {
 // wallBoot (re)starts the frame pipeline for wp at the given size.
 func (v *view) wallBoot(wp *wallpaper, w, h int) error {
 	if v.wallImg != nil && (v.wallW != w || v.wallH != h) {
-		C.canvas_destroy_image(v.wallImg)
+		C.lythrum_destroy_image(v.wallImg)
 		v.wallImg = nil
 		v.wallW, v.wallH = 0, 0
 	}
@@ -4798,9 +4799,9 @@ func wallpaperConfigPath() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".config", "canvas", "wallpaper.json")
+		return filepath.Join(home, ".config", "lythrum", "wallpaper.json")
 	}
-	return filepath.Join(base, "canvas", "wallpaper.json")
+	return filepath.Join(base, "lythrum", "wallpaper.json")
 }
 
 func (v *view) saveWallpaper() {

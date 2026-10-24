@@ -9,7 +9,7 @@ package main
 // The board asks for the touch events of the screen: the beginning, the
 // movement and the end of a touch. The mask of the events covers the bits
 // 16 to 23, the third byte of the mask.
-static int canvas_xi_select_touch(Display *dpy, Window w) {
+static int lythrum_xi_select_touch(Display *dpy, Window w) {
 	unsigned char bits[3];
 	bits[0] = 0;
 	bits[1] = 0;
@@ -24,7 +24,7 @@ static int canvas_xi_select_touch(Display *dpy, Window w) {
 
 // The touch events arrive as generic events: the helper reads the type, the
 // finger and the position out of them.
-static int canvas_xi_touch(Display *dpy, XEvent *xev, int *type, int *id,
+static int lythrum_xi_touch(Display *dpy, XEvent *xev, int *type, int *id,
                            double *x, double *y) {
 	XGenericEventCookie *cookie = &xev->xcookie;
 	if (!XGetEventData(dpy, cookie)) {
@@ -70,7 +70,7 @@ func (v *view) gesturesInit() {
 	if C.XIQueryVersion(v.dpy, &maj, &min) == 0 || maj < 2 {
 		return
 	}
-	C.canvas_xi_select_touch(v.dpy, v.win)
+	C.lythrum_xi_select_touch(v.dpy, v.win)
 	C.XFlush(v.dpy)
 	v.gesturesOK = true
 }
@@ -79,7 +79,7 @@ func (v *view) gesturesInit() {
 func (v *view) onXIEvent(xev *C.XEvent) {
 	var kind, id C.int
 	var x, y C.double
-	if C.canvas_xi_touch(v.dpy, xev, &kind, &id, &x, &y) == 0 {
+	if C.lythrum_xi_touch(v.dpy, xev, &kind, &id, &x, &y) == 0 {
 		return
 	}
 	switch kind {

@@ -8,6 +8,7 @@ package main
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <locale.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
@@ -49,6 +50,26 @@ static void selection_notify(Display *dpy, Window requestor, Atom selection,
 	se->property = property;
 	se->time = time;
 	XSendEvent(dpy, requestor, False, 0, &ev);
+}
+
+// The input context translates a key into the characters of the user's
+// locale, so a file can be renamed in any language and not only in ASCII.
+static void fileman_init_locale(void) { setlocale(LC_ALL, ""); }
+static XIM fileman_open_im(Display *dpy) {
+	return XOpenIM(dpy, NULL, NULL, NULL);
+}
+static XIC fileman_create_ic(Display *dpy, XIM im, Window win) {
+	if (im == NULL) return NULL;
+	return XCreateIC(im, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+	                 XNClientWindow, win, XNFocusWindow, win, NULL);
+}
+static int fileman_lookup_utf8(XIC ic, XKeyEvent *ev, char *buf, int len) {
+	if (ic == NULL) {
+		KeySym ks;
+		return XLookupString(ev, buf, len, &ks, NULL);
+	}
+	Status st;
+	return Xutf8LookupString(ic, ev, buf, len, NULL, &st);
 }
 */
 import "C"
@@ -116,13 +137,21 @@ type app struct {
 
 	w, h int
 
-	dir     string
-	history []string
-	entries []entry
-	hover   int
-	pressed int
-	lastIdx int
-	lastAt  time.Time
+	dir        string
+	history    []string
+	entries    []entry
+	hover      int
+	pressed    int
+	lastIdx    int
+	lastAt     time.Time
+	renaming   int // the line whose name is being typed, -1 when none
+	renameText string
+
+	// the input context that decodes a key into the text of the locale
+	im C.XIM
+	ic C.XIC
+	// notice is the message of the last refused action
+	notice string
 
 	// the drag of a file over another application
 	dragging      bool
@@ -147,6 +176,7 @@ var (
 	colBorder  = rgb(0x3a, 0x41, 0x4e)
 	colHead    = rgb(0x22, 0x26, 0x2e)
 	colDirChip = rgb(0x2f, 0x3a, 0x4a)
+	colError   = rgb(0xe0, 0x6a, 0x6a)
 )
 
 type rgbT struct{ r, g, b byte }
@@ -161,7 +191,7 @@ func main() {
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
-	a := &app{dir: dir, hover: -1, pressed: -1, lastIdx: -1}
+	a := &app{dir: dir, hover: -1, pressed: -1, lastIdx: -1, renaming: -1}
 	if err := a.run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fileman:", err)
 		os.Exit(1)
@@ -169,6 +199,7 @@ func main() {
 }
 
 func (a *app) run() error {
+	C.fileman_init_locale()
 	a.dpy = C.XOpenDisplay(nil)
 	if a.dpy == nil {
 		return fmt.Errorf("cannot open display")
@@ -195,6 +226,8 @@ func (a *app) run() error {
 	}
 	a.colors = map[uint32]*C.XftColor{}
 	a.initAtoms()
+	a.im = C.fileman_open_im(a.dpy)
+	a.ic = C.fileman_create_ic(a.dpy, a.im, a.win)
 	a.readDir()
 
 	var ev C.XEvent
@@ -353,15 +386,16 @@ func (a *app) draw() {
 	// the bar of the path
 	a.fill(0, 0, a.w, headH, colHead)
 	a.fill(0, headH-1, a.w, 1, colBorder)
-	// the way back
-	a.fill(10, 8, 18, 18, colDirChip)
-	a.fill(14, 12, 10, 10, colAccent)
+	// the buttons: back, up, home
+	a.button(10, 8, "back")
+	a.button(34, 8, "up")
+	a.button(58, 8, "home")
 	// the path
 	path := a.dir
 	if home, err := os.UserHomeDir(); err == nil {
 		path = strings.Replace(path, home, "~", 1)
 	}
-	a.text(38, 23, path, colText)
+	a.text(88, 23, path, colText)
 	// the list
 	y := headH + 6
 	for i, e := range a.entries {
@@ -379,12 +413,52 @@ func (a *app) draw() {
 		if e.isDir {
 			a.fill(18, y+(rowH-iconSz)/2+4, iconSz-8, 3, colBg)
 		}
-		a.text(40, y+18, e.name, colText)
+		name := e.name
+		if i == a.renaming {
+			name = a.renameText + "▏"
+		}
+		a.text(40, y+18, name, colText)
 		y += rowH
+	}
+	if a.notice != "" {
+		a.text(10, a.h-10, a.notice, colError)
 	}
 	C.XCopyArea(a.dpy, a.pm, a.win, a.gc, 0, 0,
 		C.uint(a.w), C.uint(a.h), 0, 0)
 	C.XFlush(a.dpy)
+}
+
+// button paints one of the buttons of the bar.
+func (a *app) button(x, y int, kind string) {
+	a.fill(x, y, 20, 18, colDirChip)
+	switch kind {
+	case "back":
+		// an arrow to the left
+		a.fill(x+7, y+4, 2, 10, colAccent)
+		a.fill(x+5, y+7, 2, 4, colAccent)
+	case "up":
+		a.fill(x+9, y+4, 2, 10, colAccent)
+		a.fill(x+6, y+7, 8, 2, colAccent)
+	case "home":
+		a.fill(x+5, y+8, 10, 6, colAccent)
+		a.fill(x+9, y+4, 2, 4, colAccent)
+	}
+}
+
+// buttonAt returns the button of the bar under a point, or an empty string.
+func (a *app) buttonAt(x, y int) string {
+	if y < 0 || y >= headH {
+		return ""
+	}
+	for _, b := range []struct {
+		x    int
+		kind string
+	}{{10, "back"}, {34, "up"}, {58, "home"}} {
+		if x >= b.x && x < b.x+20 {
+			return b.kind
+		}
+	}
+	return ""
 }
 
 // rowAt returns the entry under a point of the list.
@@ -402,9 +476,17 @@ func (a *app) rowAt(y int) int {
 // onPress reacts to a click.
 func (a *app) onPress(be *C.XButtonEvent) {
 	x, y := int(be.x), int(be.y)
+	a.notice = ""
 	if be.button == 1 {
-		if y < headH && x < 40 {
+		switch a.buttonAt(x, y) {
+		case "back":
+			a.goBack()
+			return
+		case "up":
 			a.goUp()
+			return
+		case "home":
+			a.goHome()
 			return
 		}
 		i := a.rowAt(y)
@@ -472,6 +554,11 @@ func (a *app) onMotion(me *C.XMotionEvent) {
 // onKey reacts to a key.
 func (a *app) onKey(ke *C.XKeyEvent) {
 	ks := C.XLookupKeysym(ke, 0)
+	if a.renaming >= 0 {
+		a.renameKey(ke, ks)
+		return
+	}
+	a.notice = ""
 	switch ks {
 	case 0xff1b: // Escape
 		C.XCloseDisplay(a.dpy)
@@ -492,6 +579,14 @@ func (a *app) onKey(ke *C.XKeyEvent) {
 		if a.hover >= 0 {
 			a.open(a.hover)
 		}
+	case 0xffbe: // F2: rename
+		if a.hover >= 0 {
+			a.rename(a.hover)
+		}
+	case 0xffff: // Delete
+		if a.hover >= 0 {
+			a.remove(a.hover)
+		}
 	}
 }
 
@@ -511,6 +606,159 @@ func (a *app) open(i int) {
 	}
 	cmd := exec.Command("xdg-open", e.path)
 	cmd.Start()
+}
+
+// goBack returns to the folder the window came from.
+func (a *app) goBack() {
+	if len(a.history) == 0 {
+		return
+	}
+	dir := a.history[len(a.history)-1]
+	a.history = a.history[:len(a.history)-1]
+	a.dir = dir
+	a.readDir()
+	a.hover = -1
+	a.draw()
+}
+
+// goHome opens the home folder of the user.
+func (a *app) goHome() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	a.history = append(a.history, a.dir)
+	a.dir = home
+	a.readDir()
+	a.hover = -1
+	a.draw()
+}
+
+// rename asks for another name of a file: the name is typed in the window
+// itself, over the line of the file.
+func (a *app) rename(i int) {
+	if i < 0 || i >= len(a.entries) {
+		return
+	}
+	a.notice = ""
+	a.renaming = i
+	a.renameText = a.entries[i].name
+	a.draw()
+}
+
+// validName reports whether name can be used for a file of the shown folder.
+// A name is a single path element: no separators, no dot entries.
+func validName(name string) bool {
+	if name == "" || name == "." || name == ".." || len(name) > 255 {
+		return false
+	}
+	if strings.ContainsAny(name, "/\x00") {
+		return false
+	}
+	return filepath.Base(name) == name
+}
+
+// renameKey takes a key while a name is being typed.
+func (a *app) renameKey(ke *C.XKeyEvent, ks C.KeySym) bool {
+	switch ks {
+	case 0xff1b: // Escape: leave the name alone
+		a.renaming = -1
+		a.renameText = ""
+		a.draw()
+		return true
+	case 0xff0d: // Return: the new name
+		i := a.renaming
+		name := strings.TrimSpace(a.renameText)
+		a.renaming = -1
+		a.renameText = ""
+		if i < 0 || i >= len(a.entries) {
+			a.draw()
+			return true
+		}
+		if !validName(name) {
+			a.notice = "недопустимое имя"
+			a.draw()
+			return true
+		}
+		e := a.entries[i]
+		if name != e.name {
+			target := filepath.Join(a.dir, name)
+			// os.Rename overwrites the target: never lose an existing file.
+			if _, err := os.Lstat(target); err == nil {
+				a.notice = "уже существует: " + name
+			} else if err := os.Rename(e.path, target); err != nil {
+				a.notice = "не удалось переименовать"
+			}
+		}
+		a.readDir()
+		a.draw()
+		return true
+	case 0xff08: // Backspace: drop a whole character, not a byte
+		if r := []rune(a.renameText); len(r) > 0 {
+			a.renameText = string(r[:len(r)-1])
+			a.draw()
+		}
+		return true
+	}
+	// The text of the key in the locale of the user: Unicode, not ASCII.
+	var buf [64]C.char
+	n := C.fileman_lookup_utf8(a.ic, ke, &buf[0], C.int(len(buf)))
+	if n <= 0 {
+		return false
+	}
+	text := C.GoStringN(&buf[0], n)
+	if len(a.renameText)+len(text) > 255 {
+		return false
+	}
+	changed := false
+	for _, r := range text {
+		// Control characters and path separators have no place in a name.
+		if r < 0x20 || r == 0x7f || r == '/' {
+			continue
+		}
+		a.renameText += string(r)
+		changed = true
+	}
+	if changed {
+		a.draw()
+	}
+	return changed
+}
+
+// remove puts a file in the trash. A failed move is reported, never turned
+// into a permanent delete.
+func (a *app) remove(i int) {
+	if i < 0 || i >= len(a.entries) {
+		return
+	}
+	a.notice = ""
+	e := a.entries[i]
+	trash := filepath.Join(a.home(), ".local", "share", "Trash", "files")
+	if err := os.MkdirAll(trash, 0755); err != nil {
+		a.notice = "корзина недоступна"
+		a.draw()
+		return
+	}
+	base := filepath.Base(e.path)
+	target := filepath.Join(trash, base)
+	if _, err := os.Lstat(target); err == nil {
+		target = filepath.Join(trash, fmt.Sprintf("%d-%s", time.Now().Unix(), base))
+	}
+	if err := os.Rename(e.path, target); err != nil {
+		a.notice = "не удалось переместить в корзину"
+		a.draw()
+		return
+	}
+	a.readDir()
+	a.draw()
+}
+
+// home returns the home folder of the user.
+func (a *app) home() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return "."
 }
 
 // goUp goes to the parent folder.

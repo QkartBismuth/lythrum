@@ -10,11 +10,9 @@ export_presets.cfg
 .mcp-shots/
 
 # Go
-/lythrum
 *.exe
 
 # Lythrum
-/lythrum
 *.test
 *.out
 xvfb*.log
@@ -22,5 +20,5 @@ xvfb*.log
 /xvfb-run.sh
 
 # Собранные программы оболочки
-/canvas/canvas
-/canvas/fileman/fileman
+/lythrum/lythrum
+/lythrum/fileman/fileman

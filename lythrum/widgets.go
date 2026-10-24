@@ -10,14 +10,14 @@ package main
 
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
-static GHashTable *canvas_widget_views = NULL;
+static GHashTable *lythrum_widget_views = NULL;
 
-// canvas_widget_new creates a widget: a window without a frame that holds a
+// lythrum_widget_new creates a widget: a window without a frame that holds a
 // web page. The style sheet of the active style is added to the page.
-static unsigned long canvas_widget_new(const char *uri, const char *css,
+static unsigned long lythrum_widget_new(const char *uri, const char *css,
                                        const char *title, int w, int h) {
-	if (!canvas_widget_views) {
-		canvas_widget_views = g_hash_table_new(g_direct_hash, g_direct_equal);
+	if (!lythrum_widget_views) {
+		lythrum_widget_views = g_hash_table_new(g_direct_hash, g_direct_equal);
 	}
 	GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_decorated(GTK_WINDOW(win), FALSE);
@@ -49,21 +49,21 @@ static unsigned long canvas_widget_new(const char *uri, const char *css,
 	}
 	GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
 	if (!gw) {
-		g_printerr("canvas: the widget window has no GDK window yet\n");
+		g_printerr("lythrum: the widget window has no GDK window yet\n");
 		return 0;
 	}
 	unsigned long xid = (unsigned long)GDK_WINDOW_XID(gw);
-	g_hash_table_insert(canvas_widget_views, GUINT_TO_POINTER(xid), view);
+	g_hash_table_insert(lythrum_widget_views, GUINT_TO_POINTER(xid), view);
 	return xid;
 }
 
-// canvas_widget_uri returns the address of the page of a widget. The page
+// lythrum_widget_uri returns the address of the page of a widget. The page
 // sends its commands to the shell in the fragment of the address.
-static char *canvas_widget_uri(unsigned long xid) {
-	if (!canvas_widget_views) {
+static char *lythrum_widget_uri(unsigned long xid) {
+	if (!lythrum_widget_views) {
 		return NULL;
 	}
-	WebKitWebView *view = g_hash_table_lookup(canvas_widget_views,
+	WebKitWebView *view = g_hash_table_lookup(lythrum_widget_views,
 		GUINT_TO_POINTER(xid));
 	if (!view) {
 		return NULL;
@@ -72,12 +72,12 @@ static char *canvas_widget_uri(unsigned long xid) {
 	return uri ? g_strdup(uri) : NULL;
 }
 
-// canvas_widget_js runs a script inside a widget.
-static void canvas_widget_js(unsigned long xid, const char *js) {
-	if (!canvas_widget_views) {
+// lythrum_widget_js runs a script inside a widget.
+static void lythrum_widget_js(unsigned long xid, const char *js) {
+	if (!lythrum_widget_views) {
 		return;
 	}
-	WebKitWebView *view = g_hash_table_lookup(canvas_widget_views,
+	WebKitWebView *view = g_hash_table_lookup(lythrum_widget_views,
 		GUINT_TO_POINTER(xid));
 	if (!view) {
 		return;
@@ -120,7 +120,7 @@ func (v *view) initToolkit() {
 		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 	}
 	if C.gtk_init_check(nil, nil) == 0 {
-		fmt.Fprintln(os.Stderr, "canvas: the toolkit of the widgets is not available")
+		fmt.Fprintln(os.Stderr, "lythrum: the toolkit of the widgets is not available")
 		return
 	}
 	// The engine took the interrupt signal for its collector: the board
@@ -211,22 +211,22 @@ func widgetFile(name string) (string, error) {
 	candidates := []string{
 		filepath.Join(widgetFolder(), name),
 		filepath.Join("data", "widgets", name),
-		filepath.Join("canvas", "data", "widgets", name),
+		filepath.Join("lythrum", "data", "widgets", name),
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(dir, "data", "widgets", name),
 			filepath.Join(dir, "..", "data", "widgets", name),
-			filepath.Join(dir, "..", "share", "canvas", "data", "widgets", name),
-			filepath.Join(dir, "..", "..", "share", "canvas", "data", "widgets", name))
+			filepath.Join(dir, "..", "share", "lythrum", "data", "widgets", name),
+			filepath.Join(dir, "..", "..", "share", "lythrum", "data", "widgets", name))
 	}
 	candidates = append(candidates,
-		filepath.Join("/usr/local/share/canvas/data/widgets", name),
-		filepath.Join("/usr/share/canvas/data/widgets", name))
+		filepath.Join("/usr/local/share/lythrum/data/widgets", name),
+		filepath.Join("/usr/share/lythrum/data/widgets", name))
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates,
-			filepath.Join(home, ".local", "share", "canvas", "data", "widgets", name))
+			filepath.Join(home, ".local", "share", "lythrum", "data", "widgets", name))
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
@@ -259,7 +259,7 @@ func (v *view) createWidget(def widgetDef) {
 	}
 	css := styleWidgetCSS(v.cfg.Style)
 	uri := "file://" + path
-	xid := C.canvas_widget_new(cstr(uri), cstr(css), cstr(def.title),
+	xid := C.lythrum_widget_new(cstr(uri), cstr(css), cstr(def.title),
 		C.int(def.w), C.int(def.h))
 	if xid == 0 {
 		v.setStatus("Не удалось открыть виджет")
@@ -290,7 +290,7 @@ func (v *view) widgetJS(xid C.ulong, script string) {
 	if xid == 0 {
 		return
 	}
-	C.canvas_widget_js(xid, cstr(script))
+	C.lythrum_widget_js(xid, cstr(script))
 }
 
 // widgetCommand is a command a widget sends to the shell.
@@ -437,7 +437,7 @@ func (v *view) pollWidgets() {
 		if !w.widget {
 			continue
 		}
-		uri := C.canvas_widget_uri(w.widgetXID)
+		uri := C.lythrum_widget_uri(w.widgetXID)
 		if uri == nil {
 			continue
 		}

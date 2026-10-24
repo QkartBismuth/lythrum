@@ -133,7 +133,7 @@ func (v *view) writeSound(data []byte) (string, error) {
 		if err != nil {
 			dir = os.TempDir()
 		}
-		dir = filepath.Join(dir, "canvas")
+		dir = filepath.Join(dir, "lythrum")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", err
 		}
