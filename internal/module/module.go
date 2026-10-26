@@ -26,5 +26,5 @@ type funcModule struct {
 	fn   func(ctx context.Context) error
 }
 
-func (f funcModule) Name() string                      { return f.name }
-func (f funcModule) Run(ctx context.Context) error     { return f.fn(ctx) }
+func (f funcModule) Name() string                  { return f.name }
+func (f funcModule) Run(ctx context.Context) error { return f.fn(ctx) }

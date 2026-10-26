@@ -127,6 +127,45 @@ func (s *State) FocusWindow(id WID) {
 	}
 }
 
+// CycleFocus переключает фокус по кольцу живых окон (порядок id) —
+// действие Meta/Alt+Tab. step = +1 вперёд, -1 назад. Свернутые окна
+// пропускаются. Возвращает новое активное окно.
+func (s *State) CycleFocus(step int) (*Window, bool) {
+	live := make([]*Window, 0, len(s.windows))
+	for _, w := range s.Windows() {
+		if !w.Minimized {
+			live = append(live, w)
+		}
+	}
+	if len(live) == 0 {
+		s.Focus = 0
+		return nil, false
+	}
+
+	idx := 0
+	if s.Focus != 0 {
+		for i, w := range live {
+			if w.ID == s.Focus {
+				idx = i
+				break
+			}
+		}
+		// Циклический сдвиг с корректной работой для отрицательного step.
+		idx = ((idx+step)%len(live) + len(live)) % len(live)
+	}
+	s.Focus = live[idx].ID
+	return live[idx], true
+}
+
+// CenterCamPos возвращает позицию камеры, центрирующую окно w в вьюпорте
+// (камера = левый верхний угол, поэтому вычитаем половину вьюпорта).
+func (s *State) CenterCamPos(w *Window) core.Vec2 {
+	return core.Vec2{
+		X: w.Rect.X + w.Rect.W/2 - s.ViewportW/2,
+		Y: w.Rect.Y + w.Rect.H/2 - s.ViewportH/2,
+	}
+}
+
 // ── Персистентность (Спринт 1: JSON-сессия для отладки и рестартов) ─────
 
 // ToSnapshot сериализует состояние в снапшот сессии.

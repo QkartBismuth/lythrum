@@ -91,21 +91,21 @@ var (
 // All — снапшот палитры по именам: для Control Center (Спринт 5) и отладки.
 func All() map[string]Color {
 	return map[string]Color{
-		"CanvasBackground":      CanvasBackground,
-		"CanvasGrid":            CanvasGrid,
-		"WindowBorderActive":    WindowBorderActive,
-		"WindowBorderInactive":  WindowBorderInactive,
-		"WindowTitleText":       WindowTitleText,
-		"MenuBackground":        MenuBackground,
-		"MenuHoverItem":         MenuHoverItem,
-		"MenuText":              MenuText,
-		"MenuSeparator":         MenuSeparator,
-		"MenuShortcut":          MenuShortcut,
-		"OverlayBackground":     OverlayBackground,
-		"OverlayAccent":         OverlayAccent,
-		"ButtonActive":          ButtonActive,
-		"OverlayText":           OverlayText,
-		"SnapGuideLine":         SnapGuideLine,
+		"CanvasBackground":     CanvasBackground,
+		"CanvasGrid":           CanvasGrid,
+		"WindowBorderActive":   WindowBorderActive,
+		"WindowBorderInactive": WindowBorderInactive,
+		"WindowTitleText":      WindowTitleText,
+		"MenuBackground":       MenuBackground,
+		"MenuHoverItem":        MenuHoverItem,
+		"MenuText":             MenuText,
+		"MenuSeparator":        MenuSeparator,
+		"MenuShortcut":         MenuShortcut,
+		"OverlayBackground":    OverlayBackground,
+		"OverlayAccent":        OverlayAccent,
+		"ButtonActive":         ButtonActive,
+		"OverlayText":          OverlayText,
+		"SnapGuideLine":        SnapGuideLine,
 	}
 }
 

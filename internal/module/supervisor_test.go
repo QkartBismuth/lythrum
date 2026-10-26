@@ -88,7 +88,7 @@ func TestSupervisorIsolation(t *testing.T) {
 	sup.SetBackoff(time.Millisecond, 5*time.Millisecond)
 	defer sup.Stop()
 
-	sup.Go(&failingModule{})  // вечный падальщик
+	sup.Go(&failingModule{}) // вечный падальщик
 	sup.Go(&healthyModule{}) // свидетель
 
 	eventually(t, 3*time.Second, func() bool {

@@ -43,11 +43,11 @@ func NewProcessor(pub Publisher, layout *LayoutMachine) *InputProcessor {
 	// Таблица хоткеев — данные, а не switch-лес: сочетание → действие.
 	ip.hot = map[Combo]func(*Ctx){
 		// ── Системные (Windows 11 / KDE Plasma) ──
-		{Mods: ModMeta, Key: KeyS}: act(module.EvToggleSearch),
-		{Mods: ModMeta, Key: KeyL}: act(module.EvLockSession), // SDDM: main loop зовёт os/exec
-		{Mods: ModMeta, Key: KeyI}: act(module.EvOpenControlCenter),
-		{Mods: ModMeta, Key: KeyD}: act(module.EvMinimizeAll),
-		{Mods: ModMeta, Key: KeyR}: act(module.EvRunDialog),
+		{Mods: ModMeta, Key: KeyS}:                 act(module.EvToggleSearch),
+		{Mods: ModMeta, Key: KeyL}:                 act(module.EvLockSession), // SDDM: main loop зовёт os/exec
+		{Mods: ModMeta, Key: KeyI}:                 act(module.EvOpenControlCenter),
+		{Mods: ModMeta, Key: KeyD}:                 act(module.EvMinimizeAll),
+		{Mods: ModMeta, Key: KeyR}:                 act(module.EvRunDialog),
 		{Mods: ModCtrl | ModShift, Key: KeyEscape}: act(module.EvTaskManager),
 		{Mods: ModAlt, Key: KeyF4}:                 act(module.EvCloseWindow),
 		{Mods: ModMeta, Key: KeyV}:                 act(module.EvClipboardHistory),

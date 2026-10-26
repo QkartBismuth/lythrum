@@ -8,8 +8,8 @@ package core
 // Vec2 — точка или вектор в 2D-пространстве.
 type Vec2 struct{ X, Y float64 }
 
-func (v Vec2) Add(o Vec2) Vec2  { return Vec2{v.X + o.X, v.Y + o.Y} }
-func (v Vec2) Sub(o Vec2) Vec2  { return Vec2{v.X - o.X, v.Y - o.Y} }
+func (v Vec2) Add(o Vec2) Vec2    { return Vec2{v.X + o.X, v.Y + o.Y} }
+func (v Vec2) Sub(o Vec2) Vec2    { return Vec2{v.X - o.X, v.Y - o.Y} }
 func (v Vec2) Mul(k float64) Vec2 { return Vec2{v.X * k, v.Y * k} }
 
 // Rect — прямоугольник в глобальных координатах холста.
