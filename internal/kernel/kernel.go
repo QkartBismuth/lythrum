@@ -12,6 +12,7 @@ import (
 	"lythrum/internal/canvas"
 	"lythrum/internal/core"
 	"lythrum/internal/module"
+	"lythrum/internal/preview"
 	"lythrum/internal/session"
 )
 
@@ -31,6 +32,11 @@ type Kernel struct {
 	// Launch — запуск системных команд (SDDM, проводник). Вынесен как
 	// hook: интеграционные тесты подменяют его и не трогают реальную ОС.
 	Launch func(cmdline string)
+
+	// Hook — побочный эффект после Apply (звуки, индикаторы). Вызывается
+	// из main loop; nil — отключён. Держится вне Apply, чтобы ядро
+	// не зависело от аудио-подсистемы.
+	Hook func(ev module.Event)
 }
 
 // New собирает ядро поверх холста и менеджера сессии.
@@ -98,8 +104,26 @@ func (k *Kernel) Apply(ev module.Event) bool {
 			go k.Launch("loginctl lock-session")
 		}
 
-	// ── Заготовки подсистем Спринтов 3–5: оверлей-UI и звук (S3),
-	// DND/виджеты (S4), Control Center (S5) ──
+	case module.EvDroppedFile:
+		// DND: файл из окна приложения сброшен на холст → карточка
+		// Live Preview (тест 4.6). Путь падает вместе с точкой холста.
+		card, err := preview.OpenCard(ev.Str, core.Rect{
+			X: ev.Vec.X, Y: ev.Vec.Y, W: 160, H: 120,
+		})
+		if err != nil {
+			// Неизвестный/недоступный файл: карточку не создаём — лог.
+			os.Stderr.WriteString("lythrum: dnd drop " + ev.Str + ": " + err.Error() + "\n")
+			return false
+		}
+		s.AddCard(card)
+
+	case module.EvCardMove:
+		s.MoveCard(ev.Str, ev.Vec)
+	case module.EvCardRemove:
+		s.RemoveCard(ev.Str)
+
+	// ── Заготовки подсистем Спринтов 4–5: оверлей-UI и звук (S3),
+	// виджеты (S4), Control Center (S5) ──
 	case module.EvLayoutChanged, module.EvToggleSearch, module.EvPowerOverlay,
 		module.EvOpenControlCenter, module.EvRunDialog, module.EvTaskManager,
 		module.EvCloseWindow, module.EvClipboardHistory, module.EvScreenshot,

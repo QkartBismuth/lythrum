@@ -103,6 +103,7 @@ type State struct {
     ViewportW, ViewportH, SnapThresholdPx float64
     windows map[WID]*Window
     guides  []core.Guide // активные магнитные линии
+    cards   map[string]*preview.Card // карточки Live Preview (S3)
 }
 type Window struct {
     ID WID; Title string; Rect core.Rect
@@ -124,13 +125,23 @@ type InputProcessor struct {
 // session — персистентность
 type Snapshot struct {
     Version int; Camera CameraSnapshot; Windows []WindowSnapshot
+    Cards []CardSnapshot // карточки Live Preview (S3)
 }
 type Manager struct{ path string } // атомарная запись: tmp + rename
 
-// Планируемые (Спринты 3–5):
+// wallpaper (S3) — обои с изоляцией отказов:
+// Manager.SetSource(path) → Provider(Gif|Video|Shader) в горутине;
+// паника/ошибка → backoff-перезапуск; последний кадр — latest-wins под RWMutex.
+// preview (S3) — карточки: OpenCard(path, rect) → Card{ID, Path, Kind, Title, Rect, Poster};
+// постер видео — первый кадр через ffmpeg; живут в canvas.State и сессии.
+// audio (S3) — AudioManager: очередь имён → кэш декодированных Clip (WAV/OGG)
+// → SubprocessPlayer (paplay/pw-play/aplay); SoundHook — события ядра → схема
+// Chrome OS Flex (click/error/notify/device/power).
+// ui (S3) — Menu/MenuStack/PowerOverlay: модель оверлей-слоя в ЭКРАННЫХ
+// пикселях 1:1 (зум холста не участвует), флип у краёв, навигация клавишами.
+
+// Планируемые (Спринты 4–5):
 // dnd.DNDManager     — Source, GhostPos, DropTarget, DataDevice
-// wallpaper.Manager  — Provider(Gif|Video|Shader), chan Frame, cancel
-// preview.Card       — Path, Kind, Rect, Poster, FrameSource, AlbumArt
 // widgets.Manager    — instances, WidgetRenderer(CDP|CEF), rpc.Server, Permissions
 // control.ConfigManager — sync.RWMutex + подписчики hot-reload
 ```
@@ -208,7 +219,7 @@ Snapping: для каждой пары кромок (L↔L, R↔L, L↔R, R↔R;
 Методология каждой фичи: разработка → локальный коммит → юнит-тест модуля →
 фиксы → интеграционный тест со стабильным ядром → финальный коммит.
 
-### Спринт 1 — Базовое ядро ✅ (текущий)
+### Спринт 1 — Базовое ядро ✅
 Задачи: математика (камера/снап/тайлинг), палитра, каркас Module/Supervisor,
 состояние холста, main loop, JSON-сессия (ранняя, для отладки).
 
@@ -227,7 +238,7 @@ Snapping: для каждой пары кромок (L↔L, R↔L, L↔R, R↔R;
 | 1.11 | Unit | `TestSupervisorIsolation` | падение модуля не задевает соседей |
 | 1.12 | Integration | main loop: события камеры → состояние | камера/холст сходятся, сессия пишется атомарно |
 
-### Спринт 2 — Ввод, хоткеи, ресурсы
+### Спринт 2 — Ввод, хоткеи, ресурсы ✅
 Задачи: InputProcessor (готов), интеграция xkbcommon, загрузка Geologica,
 атлас Material Symbols, WaylandBackend (seats, outputs).
 
@@ -243,20 +254,24 @@ Snapping: для каждой пары кромок (L↔L, R↔L, L↔R, R↔R;
 | 2.8 | Integration | headless-события → InputProcessor → main loop | full pipeline клавиатуры без дисплея |
 | 2.9 | Integration | WaylandBackend: 2 клиента, фокус, геометрия | окна живут в глобальных координатах |
 
-### Спринт 3 — Медиа, звук, контекст
+### Спринт 3 — Медиа, звук, контекст ✅ (текущий)
 Задачи: WallpaperManager (GIF/видео/шейдер), AudioManager (WAV/OGG Chrome OS Flex),
 карточки Live Preview, контекстные меню (оверлей-слой), жесты трекпада.
 
 | # | Уровень | Тест-кейс | Ожидание |
 |---|---|---|---|
-| 3.1 | Unit | GIF-провайдер: кадры по расписанию задержек | темп кадров соответствует метаданным |
-| 3.2 | Unit | видео-декодер (фейк/ffmpeg): кадр → RGBA | таймлайн не искажается, ошибки изолированы |
-| 3.3 | Unit | AudioManager: WAV/OGG → сэмплы, микс каналов | отсутствие файла не роняет модуль |
-| 3.4 | Unit | карточка: Kind по расширению, Poster | image/gif/video/audio классифицируются |
-| 3.5 | Unit | меню: навигация стрелками, hover, шорткаты | выбор корректен, Esc закрывает |
-| 3.6 | Integration | крах декодера обоев | Supervisor рестартит, холст жив |
-| 3.7 | Integration | трекпад: пан/пинч → камера | ZoomAt держит точку, инерция без рывков |
-| 3.8 | Integration | меню при зуме 4x | текст меню 1:1, позиция = курсор |
+| 3.1 | Unit | `TestGifProviderTimeline` | кадры по расписанию задержек метаданных GIF |
+| 3.2 | Unit | `TestFFmpegVideoFrames` | декодер ffmpeg → RGBA-кадры под вьюпорт, темп по fps |
+| 3.3 | Unit | `TestDecodeWAV`, `TestDecodeOGGAssets`, `TestManagerMissingFile` | WAV/OGG → сэмплы; нет файла — модуль жив |
+| 3.4 | Unit | `TestKindOf`, `TestOpenCardImage` | image/gif/video/audio классифицируются, постер декодирован |
+| 3.5 | Unit | `TestMenuNavigation`, `TestMenuActivation`, `TestMenuHoverAt` | навигация с пропуском разделителей, Esc закрывает |
+| 3.6 | Integration | `TestManagerRecoversFromDecoderPanic` | паника декодера изолирована, backoff-перезапуск, метрика Restarts |
+| 3.7 | Integration | `TestGesturePanSmoothing`, `TestGesturePinch` | EMA-сглаживание без выбросов, зум в точке |
+| 3.8 | Integration | `TestMenuScreenCoordsFlip` | меню в экранных пикселях 1:1, флип у краёв, зум холста не участвует |
+
+Дополнительно: карточки в `canvas.State` и сессии (`TestSessionRoundTrip`),
+DND-дроп → карточка в ядре (`TestDroppedFileBecomesCard`), звуковой hook
+(`TestSoundHookMapping`), звуковая схема Chrome OS Flex в `assets/sounds`.
 
 ### Спринт 4 — DND и HTML5-виджеты
 Задачи: WidgetManager (CDP), проброс ввода с учётом зума, IPC-безопасность

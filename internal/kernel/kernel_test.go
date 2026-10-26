@@ -1,6 +1,9 @@
 package kernel
 
 import (
+	"image"
+	"image/png"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -173,5 +176,82 @@ func TestLaunchHookIsolated(t *testing.T) {
 	}
 	if called.Load() != 1 {
 		t.Fatal("hook вызван некорректно")
+	}
+}
+
+// Тестовая картинка: карточка для дропа (PNG 1×1).
+var pngBytes = []byte{
+	0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, // сигнатура
+}
+
+// 3.4/ядро — дроп файла создаёт карточку Live Preview на холсте.
+func TestDroppedFileBecomesCard(t *testing.T) {
+	h := newHarness(t)
+
+	// Валидный PNG через image/png: генерируем честный файл.
+	img := core.Rect{X: 10, Y: 20, W: 160, H: 120}
+	_ = img
+	path := filepath.Join(t.TempDir(), "shot.png")
+	writeTestPNG(t, path, 8, 6)
+
+	h.bus.Publish(module.Event{
+		Type: module.EvDroppedFile,
+		Str:  path,
+		Vec:  core.Vec2{X: 55, Y: 66},
+	})
+	h.pipe()
+
+	cards := h.k.State.Cards()
+	if len(cards) != 1 {
+		t.Fatalf("карточек после дропа: %d, want 1", len(cards))
+	}
+	c := cards[0]
+	if c.Path != path || c.Kind != "image" {
+		t.Fatalf("поля карточки: path=%q kind=%q", c.Path, c.Kind)
+	}
+	if c.Rect.X != 55 || c.Rect.Y != 66 {
+		t.Fatalf("позиция карточки: %v, want точка дропа (55,66)", c.Rect)
+	}
+
+	// Перемещение и удаление карточки — теми же событиями.
+	h.bus.Publish(module.Event{
+		Type: module.EvCardMove, Str: c.ID, Vec: core.Vec2{X: 1, Y: 2},
+	})
+	h.pipe()
+	if moved, _ := h.k.State.Card(c.ID); moved.Rect.X != 1 || moved.Rect.Y != 2 {
+		t.Fatalf("карточка не переместилась: %v", moved.Rect)
+	}
+	h.bus.Publish(module.Event{Type: module.EvCardRemove, Str: c.ID})
+	h.pipe()
+	if len(h.k.State.Cards()) != 0 {
+		t.Fatal("карточка не удалена")
+	}
+}
+
+// Дроп неизвестного файла не создаёт карточку и не паникует.
+func TestDroppedUnknownFileIgnored(t *testing.T) {
+	h := newHarness(t)
+	h.bus.Publish(module.Event{
+		Type: module.EvDroppedFile,
+		Str:  "/nonexistent/archive.zip",
+		Vec:  core.Vec2{},
+	})
+	h.pipe()
+	if len(h.k.State.Cards()) != 0 {
+		t.Fatal("для unknown-медиа не должно быть карточки")
+	}
+}
+
+// writeTestPNG пишет валидный PNG w×h (синхронная генерация image/png).
+func writeTestPNG(t *testing.T, path string, w, h int) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
 	}
 }

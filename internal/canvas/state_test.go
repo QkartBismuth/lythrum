@@ -1,11 +1,31 @@
 package canvas
 
 import (
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"lythrum/internal/core"
+	"lythrum/internal/preview"
 	"lythrum/internal/session"
 )
+
+// writeTestPNGFile — валидный PNG w×h по пути (для карточек и дропов).
+func writeTestPNGFile(t *testing.T, path string, w, h int) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // Спринт 1 (интеграция уровня ядра): окна получают id по порядку.
 func TestAddWindowIDs(t *testing.T) {
@@ -72,6 +92,14 @@ func TestSessionRoundTrip(t *testing.T) {
 	w2 := s.AddWindow("Music", core.Rect{X: 700, Y: 20, W: 300, H: 300})
 	w2.Minimized = true
 
+	// Карточка Live Preview в сессии (Спринт 3).
+	path := writeTestPNGFile(t, filepath.Join(t.TempDir(), "drop.png"), 8, 6)
+	card, err := preview.OpenCard(path, core.Rect{X: 5, Y: 6, W: 160, H: 120})
+	if err != nil {
+		t.Fatalf("OpenCard: %v", err)
+	}
+	s.AddCard(card)
+
 	snap := s.ToSnapshot()
 	restored := New(1920, 1080)
 	Restore(restored, snap)
@@ -85,6 +113,29 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 	if got[0].Title != "Terminal" || got[1].Title != "Music" || !got[1].Minimized {
 		t.Fatalf("окна восстановились неверно: %+v", got)
+	}
+
+	// Карточки: путь, позиция и ID сохранены через сессию.
+	rc := restored.Cards()
+	if len(rc) != 1 {
+		t.Fatalf("карточек восстановлено %d, want 1", len(rc))
+	}
+	if rc[0].ID != card.ID || rc[0].Path != path || rc[0].Rect.X != 5 {
+		t.Fatalf("карточка исказилась: %+v", rc[0])
+	}
+
+	// Исчезнувший файл: карточка-заглушка вместо падения сессии.
+	snap.Cards = append(snap.Cards, session.CardSnapshot{
+		ID: "id-ghost", Path: "/nonexistent/x.png", Kind: "image",
+		Title: "x.png", X: 1, Y: 2, W: 100, H: 80,
+	})
+	ghosted := New(1920, 1080)
+	Restore(ghosted, snap)
+	if len(ghosted.Cards()) != 2 {
+		t.Fatalf("заглушка не восстановлена: %d карточек", len(ghosted.Cards()))
+	}
+	if gc, _ := ghosted.Card("id-ghost"); gc == nil || gc.Poster != nil {
+		t.Fatalf("карточка-заглушка неверна: %+v", gc)
 	}
 }
 

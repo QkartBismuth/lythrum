@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"lythrum/internal/core"
+	"lythrum/internal/preview"
 	"lythrum/internal/render"
 	"lythrum/internal/session"
 )
@@ -37,6 +38,8 @@ type State struct {
 	windows map[WID]*Window
 	nextID  WID
 	guides  []core.Guide
+
+	cards map[string]*preview.Card // карточки Live Preview по id
 }
 
 // New создаёт холст с вьюпортом vpW×vpH и дефолтной камерой.
@@ -47,7 +50,53 @@ func New(vpW, vpH float64) *State {
 		ViewportH:       vpH,
 		SnapThresholdPx: core.DefaultSnapThresholdPx,
 		windows:         make(map[WID]*Window),
+		cards:           make(map[string]*preview.Card),
 	}
+}
+
+// ── Карточки Live Preview (Спринт 3) ────────────────────────────────────
+
+// AddCard регистрирует карточку на холсте.
+func (s *State) AddCard(c *preview.Card) { s.cards[c.ID] = c }
+
+// Card возвращает карточку по id.
+func (s *State) Card(id string) (*preview.Card, bool) {
+	c, ok := s.cards[id]
+	return c, ok
+}
+
+// Cards — карточки в стабильном порядке (по id).
+func (s *State) Cards() []*preview.Card {
+	ids := make([]string, 0, len(s.cards))
+	for id := range s.cards {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*preview.Card, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, s.cards[id])
+	}
+	return out
+}
+
+// RemoveCard убирает карточку с холста.
+func (s *State) RemoveCard(id string) bool {
+	if _, ok := s.cards[id]; !ok {
+		return false
+	}
+	delete(s.cards, id)
+	return true
+}
+
+// MoveCard перемещает карточку (drag по холству).
+func (s *State) MoveCard(id string, pos core.Vec2) bool {
+	c, ok := s.cards[id]
+	if !ok {
+		return false
+	}
+	c.Rect.X = pos.X
+	c.Rect.Y = pos.Y
+	return true
 }
 
 // AddWindow регистрирует окно и возвращает его.
@@ -184,10 +233,24 @@ func (s *State) ToSnapshot() session.Snapshot {
 			Minimized: w.Minimized,
 		})
 	}
+	for _, c := range s.Cards() {
+		snap.Cards = append(snap.Cards, session.CardSnapshot{
+			ID:    c.ID,
+			Path:  c.Path,
+			Kind:  string(c.Kind),
+			Title: c.Title,
+			X:     c.Rect.X,
+			Y:     c.Rect.Y,
+			W:     c.Rect.W,
+			H:     c.Rect.H,
+		})
+	}
 	return snap
 }
 
 // Restore применяет снапшот сессии к состоянию (после перезапуска).
+// Карточки с исчезнувшими файлами восстанавливаются без постера —
+// потеря файла не должна рушить сессию.
 func Restore(s *State, snap session.Snapshot) {
 	cam := core.Camera{X: snap.Camera.X, Y: snap.Camera.Y, Zoom: snap.Camera.Zoom}
 	if cam.Zoom <= 0 {
@@ -197,5 +260,22 @@ func Restore(s *State, snap session.Snapshot) {
 	for _, ws := range snap.Windows {
 		w := s.AddWindow(ws.Title, core.Rect{X: ws.X, Y: ws.Y, W: ws.W, H: ws.H})
 		w.Minimized = ws.Minimized
+	}
+	for _, cs := range snap.Cards {
+		rect := core.Rect{X: cs.X, Y: cs.Y, W: cs.W, H: cs.H}
+		card, err := preview.OpenCard(cs.Path, rect)
+		if err != nil {
+			// Файл исчез/не декодируется: карточка-заглушка с прежней геометрией.
+			card = &preview.Card{
+				ID:    cs.ID,
+				Path:  cs.Path,
+				Kind:  preview.MediaKind(cs.Kind),
+				Title: cs.Title,
+				Rect:  rect,
+			}
+		} else {
+			card.ID = cs.ID // сохранить ID сессии
+		}
+		s.AddCard(card)
 	}
 }

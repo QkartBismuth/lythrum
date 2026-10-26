@@ -40,6 +40,11 @@ const (
 	EvVolumeMute        EventType = "audio.mute"
 	EvBrightness        EventType = "screen.brightness" // Num: ±шаг
 	EvSessionSave       EventType = "session.save"
+
+	// Карточки Live Preview и DND (Спринты 3–4).
+	EvDroppedFile EventType = "dnd.dropped_file"    // Str: путь; Vec: точка холста
+	EvCardMove    EventType = "preview.card_move"   // Str: id; Vec: новая позиция
+	EvCardRemove  EventType = "preview.card_remove" // Str: id
 )
 
 // Event — сообщение шины. Простые поля вместо interface{}: дешёвая передача,

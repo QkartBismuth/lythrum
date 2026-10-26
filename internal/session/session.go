@@ -32,12 +32,24 @@ type WindowSnapshot struct {
 	Minimized bool    `json:"minimized"`
 }
 
-// Snapshot — полное состояние сессии. Расширяется карточками и виджетами
-// в Спринтах 3–4.
+// CardSnapshot — сериализуемая карточка Live Preview.
+type CardSnapshot struct {
+	ID    string  `json:"id"`
+	Path  string  `json:"path"`
+	Kind  string  `json:"kind"`
+	Title string  `json:"title"`
+	X     float64 `json:"x"`
+	Y     float64 `json:"y"`
+	W     float64 `json:"w"`
+	H     float64 `json:"h"`
+}
+
+// Snapshot — полное состояние сессии.
 type Snapshot struct {
 	Version int              `json:"version"`
 	Camera  CameraSnapshot   `json:"camera"`
 	Windows []WindowSnapshot `json:"windows"`
+	Cards   []CardSnapshot   `json:"cards,omitempty"`
 }
 
 // Manager владеет файлом сессии. Потокобезопасен: автосейв-горутина и

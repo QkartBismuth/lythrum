@@ -11,9 +11,11 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"lythrum/internal/audio"
 	"lythrum/internal/canvas"
 	"lythrum/internal/core"
 	"lythrum/internal/input"
@@ -22,6 +24,7 @@ import (
 	"lythrum/internal/palette"
 	"lythrum/internal/server"
 	"lythrum/internal/session"
+	"lythrum/internal/wallpaper"
 )
 
 func main() {
@@ -73,6 +76,24 @@ func run() error {
 
 	// Дисплей — модуль: краш бэкенда не роняет ядро (Supervisor перезапустит).
 	sup.Go(module.NewFunc("display.headless", backend.Run))
+
+	// ── Обои: анимированный фон с изоляцией падений декодера ──
+	// Источник задаётся переменной окружения (GIF/картинка/видео/shader);
+	// паника декодера остаётся внутри Manager'а — холст не замечает.
+	wall := wallpaper.NewManager(wallpaper.FFmpegDecoder{})
+	if src := os.Getenv("LYTHRUM_WALLPAPER"); src != "" {
+		wall.SetSource(src)
+	}
+	sup.Go(wall)
+
+	// ── Звук: схема Chrome OS Flex, вывод в отдельный процесс ──
+	// Нет аудио-стека (CI, сервер) → NullPlayer: логов нет, пан Compositor'а тоже.
+	sounds := filepath.Join(appAssetsDir(), "sounds")
+	am := audio.NewManager(sounds, audio.SubprocessPlayer{Kind: audio.AutoPlayer})
+	sup.Go(am)
+
+	// Побочные эффекты ядра: раскладка/питание/дроп → звук.
+	k.Hook = audio.SoundHook(am)
 
 	// Автосейв: раз в 10 с и при завершении — событием в шину, чтобы запись
 	// шла из main loop (владельца состояния), без гонок за снапшотом.
@@ -130,4 +151,23 @@ func sessionPath() string {
 		base = "."
 	}
 	return base + "/lythrum/session.json"
+}
+
+// appAssetsDir — каталог ресурсов (звуковая схема, шрифты). Порядок:
+// 1) LYTHRUM_ASSETS; 2) рядом с бинарником (системная установка);
+// 3) ./assets — запуск из корня репозитория (разработка).
+func appAssetsDir() string {
+	if p := os.Getenv("LYTHRUM_ASSETS"); p != "" {
+		return p
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "assets")
+		if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+			return candidate
+		}
+	}
+	if st, err := os.Stat("assets"); err == nil && st.IsDir() {
+		return "assets"
+	}
+	return "assets" // консервативно: путь по умолчанию, ошибки — в логах audio
 }
