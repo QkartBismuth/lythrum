@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"encoding/json"
 	"image"
 	"image/png"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"lythrum/internal/core"
 	"lythrum/internal/input"
 	"lythrum/internal/module"
+	"lythrum/internal/palette"
 	"lythrum/internal/render"
 	"lythrum/internal/session"
 	"lythrum/internal/widgets"
@@ -337,5 +339,69 @@ func TestPanoramaSleepsWidgetsAndRoutesInput(t *testing.T) {
 	hit, _, ok = widgets.HitAt(h.k.State.Widgets(), cam, 1920, 1080, core.Vec2{X: 200, Y: 50})
 	if !ok || hit.ID != b.ID {
 		t.Fatalf("после панорамы ввод должен идти в b: %v ok=%v", hit, ok)
+	}
+}
+
+// 5.6 — смена палитры на лету: валидный пакет применяется целиком,
+// следующий «кадр» (чтение переменных) видит новые цвета.
+func TestPaletteHotReload(t *testing.T) {
+	h := newHarness(t)
+	before := palette.WindowBorderActive.CSS()
+
+	edits, _ := json.Marshal(map[string]string{
+		"WindowBorderActive": "#FF8800",
+		"SnapGuideLine":      "#00FF00",
+	})
+	h.bus.Publish(module.Event{Type: module.EvPaletteChanged, Str: string(edits)})
+	h.pipe()
+
+	if palette.WindowBorderActive.CSS() != "#FF8800FF" {
+		t.Fatalf("палитра не применилась: %s (было %s)", palette.WindowBorderActive.CSS(), before)
+	}
+	if palette.SnapGuideLine.CSS() != "#00FF00FF" {
+		t.Fatalf("вторая правка потерялась: %s", palette.SnapGuideLine.CSS())
+	}
+}
+
+// 5.6 — битый пакет палитры: тема НЕ меняется вовсе (fail-clean).
+func TestPaletteHotReloadRejectsBadBatch(t *testing.T) {
+	h := newHarness(t)
+	before := palette.WindowBorderActive.CSS()
+
+	// Первая правка валидна, вторая битая: пакет применяется целиком или никак.
+	edits, _ := json.Marshal(map[string]string{
+		"WindowBorderActive": "#FF0000",
+		"MenuText":           "#НЕ-HEX",
+	})
+	h.bus.Publish(module.Event{Type: module.EvPaletteChanged, Str: string(edits)})
+	h.pipe()
+
+	if palette.WindowBorderActive.CSS() != before {
+		t.Fatalf("битый пакет частично применился: %s", palette.WindowBorderActive.CSS())
+	}
+
+	// Неизвестные роли не фатальны: валидные правки из пакета применяются.
+	edits2, _ := json.Marshal(map[string]string{
+		"NoSuchRole":         "#112233",
+		"WindowBorderActive": "#00CC44",
+	})
+	h.bus.Publish(module.Event{Type: module.EvPaletteChanged, Str: string(edits2)})
+	h.pipe()
+	if palette.WindowBorderActive.CSS() != "#00CC44FF" {
+		t.Fatalf("валидная правка потерялась из-за неизвестной роли: %s",
+			palette.WindowBorderActive.CSS())
+	}
+}
+
+// 5.3 (применение) — порог снапа меняется горячо и в экранных пикселях.
+func TestSnapThresholdHotSet(t *testing.T) {
+	h := newHarness(t)
+	if h.k.State.SnapThresholdPx != core.DefaultSnapThresholdPx {
+		t.Fatalf("стартовый порог: %v", h.k.State.SnapThresholdPx)
+	}
+	h.bus.Publish(module.Event{Type: module.EvSnapThreshold, Num: 24})
+	h.pipe()
+	if h.k.State.SnapThresholdPx != 24 {
+		t.Fatalf("порог не применился: %v", h.k.State.SnapThresholdPx)
 	}
 }

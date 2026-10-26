@@ -50,6 +50,10 @@ const (
 	EvWidgetCreate EventType = "widget.create" // Str: url; Vec: точка холста
 	EvWidgetRemove EventType = "widget.remove" // Str: id
 	EvWidgetMove   EventType = "widget.move"   // Str: id; Vec: новая позиция
+
+	// Горячие настройки (Спринт 5, Control Center → hot-reload).
+	EvPaletteChanged EventType = "theme.palette_changed" // Str: JSON {"Роль": "#HEX"}
+	EvSnapThreshold  EventType = "canvas.snap_threshold" // Num: порог в экранных px
 )
 
 // Event — сообщение шины. Простые поля вместо interface{}: дешёвая передача,

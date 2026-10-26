@@ -58,7 +58,9 @@ Lythrum — экспериментальный Wayland-композитор, г�
 2. Модуль падает → `Supervisor` пишет ошибку, ждёт экспоненциальный backoff, рестартит. Ядро живо.
 3. `recover()` в `runOnce()` и в критических точках рендера: паника = ошибка модуля.
 4. Ввод никогда не блокируется: `ChanPublisher.Publish` — неблокирующий (переполнение → сброс события).
-5. Зависание детектится heartbeat'ом (`Healthy()`), watchdog — в Спринте 5.
+5. Зависание детектится heartbeat'ом (`Healthy()`), watchdog — отложен
+   после Спринта 5: Supervisor покрывает крахи (panic/error → backoff-рестарт),
+   зависшие модули планируются отдельно.
 
 ---
 
@@ -154,8 +156,20 @@ type Manager struct{ path string } // атомарная запись: tmp + ren
 // dnd (S4) — Manager: Start/Move/Drop/Cancel; Payload{MIME, Data}
 // сохраняется 1:1 до цели (Canvas/Card/Widget/Window); Drop идемпотентен.
 
-// Планируемые (Спринт 5):
-// control.ConfigManager — sync.RWMutex + подписчики hot-reload
+// control (S5) — Control Center: Config с горячими настройками
+// (SnapThresholdPx, жесты, Volume, Wallpaper, права виджетов);
+// Manager: Get — снапшот-копия под RLock, Update (мутация под write-локом,
+// рассылка подписчикам ВНЕ лока — RWMutex не реентерабелен), Subscribe.
+// Сеттеры (SetPalette/SetSnapThreshold/SetVolume) валидируют значение и
+// публикуют событие в шину; применяет его ТОЛЬКО main loop:
+// EvPaletteChanged → palette.Apply (fail-clean: битый пакет целиком
+// отклонён, неизвестные роли не фатальны), EvSnapThreshold → состояние
+// холста, EvVolume → аудио. Стартовые значения — control.Default().
+// palette (S5) — Apply(edits): реестр роль→переменная; пакетная
+// валидация до применения (никаких «наполовину перекрашенных» кадров).
+// session (S5) — устойчивость: битый JSON = чистая ошибка (не паника),
+// Save поверх восстанавливает; tmp+rename — читатель видит всегда
+// валидный файл, осиротевший .tmp (kill -9 в середине сейва) игнорируется.
 ```
 
 ---
@@ -285,7 +299,7 @@ Snapping: для каждой пары кромок (L↔L, R↔L, L↔R, R↔R;
 DND-дроп → карточка в ядре (`TestDroppedFileBecomesCard`), звуковой hook
 (`TestSoundHookMapping`), звуковая схема Chrome OS Flex в `assets/sounds`.
 
-### Спринт 4 — DND и HTML5-виджеты ✅ (текущий)
+### Спринт 4 — DND и HTML5-виджеты ✅
 Задачи: WidgetManager (CDP), проброс ввода с учётом зума, IPC-безопасность
 (токены, белый список), DND-машина, карточки из дропов.
 
@@ -304,19 +318,25 @@ Chromium) по CDP: навигация, скриншот-кадр 320×200 с ф
 `TestWidgetLifecycleEvents` — create/move/remove через шину; сессия
 сохраняет виджеты (WidgetSnapshot) с НЕподъемом прав из чужого JSON.
 
-### Спринт 5 — Оптимизация и конфигуратор
+### Спринт 5 — Оптимизация и конфигуратор ✅ (текущий)
 Задачи: culling + сон окон (frame-suspension), горячие настройки Control Center
 (палитра, порог снапа, жесты, права виджетов), финализация сессий.
 
 | # | Уровень | Тест-кейс | Ожидание |
 |---|---|---|---|
-| 5.1 | Unit | `VisibleRects` на 10k окон | только видимые индексы, O(n) |
-| 5.2 | Unit | `ShouldSleep` | окно вне фрустума — сон |
-| 5.3 | Unit | ConfigManager: запись настроек из другой горутины | гонок нет (-race), hot-reload доставлен |
-| 5.4 | Unit | сессия: save/load round-trip + битый JSON | атомарность, устойчивость к мусору |
-| 5.5 | Integration | 50 окон, панорама за пределы | CPU не растёт: спящие не рендерятся |
-| 5.6 | Integration | смена палитры на лету | следующий кадр в новых цветах |
-| 5.7 | Integration | kill -9 автосейва | файл сессии не повреждён (tmp+rename) |
+| 5.1 | Unit | `TestVisibleRects10k` + `BenchmarkVisibleRects10k` | только видимые индексы на сетке 100×100; ~48µs/op на 10k окон (O(n)) |
+| 5.2 | Unit | `TestShouldSleep`, `TestCullingMarksSleeping` | окно вне фрустума — флаг Sleeping (сон frame-events) |
+| 5.3 | Unit | `TestConfigHotReload`, `TestConfigConcurrentAccess`, `TestConfigUnsubscribe`, `TestConfigSnapshotIsolation` | запись из чужой горутины: гонок нет (-race), hot-reload доставлен, снапшоты изолированы |
+| 5.4 | Unit | `TestSessionCorruptJSON` | битый JSON — чистая ошибка Load; Save поверх восстанавливает файл |
+| 5.5 | Integration | `TestFrameSuspension50Windows` | 50 окон + панорама в пустоту: все спят, кадринг виджетов замирает и возобновляется |
+| 5.6 | Integration | `TestPaletteHotReload`, `TestPaletteHotReloadRejectsBadBatch`, `TestSnapThresholdHotSet` | смена палитры на лету; битый пакет НЕ применяется вовсе (fail-clean); порог снапа горячо |
+| 5.7 | Integration | `TestSessionOrphanTmpIgnored`, `TestSessionConcurrentSaveLoad` | осиротевший .tmp игнорируется; конкурентные сейвы/чтения — всегда валидный файл |
+
+Дополнительно: `TestSettersPublishValidated` — сеттеры Control Center
+(SetPalette/SetSnapThreshold/SetVolume) валидируют значения ДО шины (битый
+HEX отсеян, громкость зажата 0–100). Пайплайн горячих настроек: сеттер →
+событие шины (`EvPaletteChanged`/`EvSnapThreshold`/`EvVolume`) → main loop
+→ `palette.Apply` (fail-clean пакет) / состояние холста.
 
 ---
 

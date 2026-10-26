@@ -6,12 +6,15 @@
 package kernel
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
+	"strings"
 
 	"lythrum/internal/canvas"
 	"lythrum/internal/core"
 	"lythrum/internal/module"
+	"lythrum/internal/palette"
 	"lythrum/internal/preview"
 	"lythrum/internal/session"
 	"lythrum/internal/widgets"
@@ -134,6 +137,24 @@ func (k *Kernel) Apply(ev module.Event) bool {
 		s.RemoveWidget(ev.Str)
 	case module.EvWidgetMove:
 		s.MoveWidget(ev.Str, ev.Vec)
+
+	// ── Горячие настройки (Спринт 5): применяет только main loop ──
+	case module.EvPaletteChanged:
+		// Правки приходят JSON'ом {"Роль": "#HEX"}; отказобезопасно:
+		// битый пакет не меняет тему вовсе. Ошибка — лог, не паника.
+		var edits map[string]string
+		if err := json.Unmarshal([]byte(ev.Str), &edits); err != nil {
+			os.Stderr.WriteString("lythrum: palette json: " + err.Error() + "\n")
+			return false
+		}
+		if unknown, err := palette.Apply(edits); err != nil {
+			os.Stderr.WriteString("lythrum: palette: " + err.Error() + "\n")
+		} else if len(unknown) > 0 {
+			os.Stderr.WriteString("lythrum: palette: неизвестные роли: " +
+				strings.Join(unknown, ", ") + "\n")
+		}
+	case module.EvSnapThreshold:
+		s.SnapThresholdPx = ev.Num
 
 	// ── Заготовки подсистем Спринтов 4–5: оверлей-UI и звук (S3),
 	// виджеты (S4), Control Center (S5) ──

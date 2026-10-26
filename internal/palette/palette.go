@@ -120,3 +120,73 @@ func Validate() error {
 	}
 	return nil
 }
+
+// ── Hot-reload (Спринт 5) ────────────────────────────────────────────────
+
+// registry — роль → переменная. Заполняется один раз; переменные меняются
+// только из main loop (через событие шины EvPaletteChanged) — отдельной
+// блокировки не нужно, читатель тоже main loop.
+var registry = map[string]*Color{
+	"CanvasBackground":     &CanvasBackground,
+	"CanvasGrid":           &CanvasGrid,
+	"WindowBorderActive":   &WindowBorderActive,
+	"WindowBorderInactive": &WindowBorderInactive,
+	"WindowTitleText":      &WindowTitleText,
+	"MenuBackground":       &MenuBackground,
+	"MenuHoverItem":        &MenuHoverItem,
+	"MenuText":             &MenuText,
+	"MenuSeparator":        &MenuSeparator,
+	"MenuShortcut":         &MenuShortcut,
+	"OverlayBackground":    &OverlayBackground,
+	"OverlayAccent":        &OverlayAccent,
+	"ButtonActive":         &ButtonActive,
+	"OverlayText":          &OverlayText,
+	"SnapGuideLine":        &SnapGuideLine,
+}
+
+// Apply применяет правки палитры по именам ролей. ОТКАЗОБЕЗОПАСНОСТЬ:
+// сначала валидируются ВСЕ правки; при хотя бы одной битой — тема не
+// меняется вовсе (никаких «наполовину перекрашенных» кадров).
+// Возвращает имена неизвестных ролей отдельным списком (не фатально).
+func Apply(edits map[string]string) (unknown []string, err error) {
+	// Валидация всего пакета правок.
+	parsed := make(map[string]Color, len(edits))
+	for role, hex := range edits {
+		if _, ok := registry[role]; !ok {
+			unknown = append(unknown, role)
+			continue
+		}
+		c, err := Hex(hex)
+		if err != nil {
+			return nil, fmt.Errorf("palette: %s: %w", role, err)
+		}
+		parsed[role] = c
+	}
+	if err := validateWith(parsed); err != nil {
+		return unknown, err
+	}
+	// Все правки валидны — применяем разом.
+	for role, c := range parsed {
+		*registry[role] = c
+	}
+	return unknown, nil
+}
+
+// validateWith — инварианты с учётом правок (поверх текущей темы).
+func validateWith(edits map[string]Color) error {
+	bg := CanvasBackground
+	menu := MenuBackground
+	if c, ok := edits["CanvasBackground"]; ok {
+		bg = c
+	}
+	if c, ok := edits["MenuBackground"]; ok {
+		menu = c
+	}
+	if bg.A != 0xFF {
+		return fmt.Errorf("palette: фон холста должен быть непрозрачным, получил %s", bg.CSS())
+	}
+	if bg == menu {
+		return fmt.Errorf("palette: фон холста и фон меню совпадают — меню будет нечитаемо")
+	}
+	return nil
+}

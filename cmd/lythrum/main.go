@@ -18,6 +18,7 @@ import (
 
 	"lythrum/internal/audio"
 	"lythrum/internal/canvas"
+	"lythrum/internal/control"
 	"lythrum/internal/core"
 	"lythrum/internal/dnd"
 	"lythrum/internal/input"
@@ -69,6 +70,13 @@ func run() error {
 
 	// ── Ввод: маршрутизатор хоткеев (горутина xkb подключается в wayland-бэкенде) ──
 	_ = input.NewProcessor(bus, input.NewLayoutMachine())
+
+	// ── Control Center: горячие настройки с hot-reload (Спринт 5) ──
+	// Стартовые значения применяются к холсту до главного цикла; последующие
+	// изменения UI Control Center'а едут через сеттеры (валидация → шина),
+	// а применяет их только main loop (владелец холста и темы).
+	cfgMgr := control.New()
+	state.SnapThresholdPx = cfgMgr.Get().SnapThresholdPx
 
 	// ── Ядро: применение событий к холсту ──
 	k := kernel.New(state, sess)
