@@ -45,6 +45,11 @@ const (
 	EvDroppedFile EventType = "dnd.dropped_file"    // Str: путь; Vec: точка холста
 	EvCardMove    EventType = "preview.card_move"   // Str: id; Vec: новая позиция
 	EvCardRemove  EventType = "preview.card_remove" // Str: id
+
+	// HTML5-виджеты (Спринт 4).
+	EvWidgetCreate EventType = "widget.create" // Str: url; Vec: точка холста
+	EvWidgetRemove EventType = "widget.remove" // Str: id
+	EvWidgetMove   EventType = "widget.move"   // Str: id; Vec: новая позиция
 )
 
 // Event — сообщение шины. Простые поля вместо interface{}: дешёвая передача,

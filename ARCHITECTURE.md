@@ -80,8 +80,8 @@ lythrum/
 │   ├── audio/    (S3)         # AudioManager, звуки Chrome OS Flex
 │   ├── preview/  (S3)         # карточки Live Preview
 │   ├── ui/       (S3)         # контекстные меню, поиск, power overlay
-│   ├── widgets/  (S4)         # WidgetManager, CDP-рендерер, IPC
-│   ├── dnd/      (S4)         # wl_data_device, сквозной drag-and-drop
+│   ├── widgets/  (S4)         # WidgetManager, CDP-рендерер, IPC-токены
+│   ├── dnd/      (S4)         # drag-and-drop: Payload, Target, идемпотентный Drop
 │   └── control/  (S5)         # Control Center, hot-reload настроек
 ├── assets/{fonts,icons,sounds}
 └── ARCHITECTURE.md
@@ -103,7 +103,8 @@ type State struct {
     ViewportW, ViewportH, SnapThresholdPx float64
     windows map[WID]*Window
     guides  []core.Guide // активные магнитные линии
-    cards   map[string]*preview.Card // карточки Live Preview (S3)
+    cards   map[string]*preview.Card   // карточки Live Preview (S3)
+    widgets map[string]*widgets.Widget // HTML5-виджеты (S4)
 }
 type Window struct {
     ID WID; Title string; Rect core.Rect
@@ -140,9 +141,20 @@ type Manager struct{ path string } // атомарная запись: tmp + ren
 // ui (S3) — Menu/MenuStack/PowerOverlay: модель оверлей-слоя в ЭКРАННЫХ
 // пикселях 1:1 (зум холста не участвует), флип у краёв, навигация клавишами.
 
-// Планируемые (Спринты 4–5):
-// dnd.DNDManager     — Source, GhostPos, DropTarget, DataDevice
-// widgets.Manager    — instances, WidgetRenderer(CDP|CEF), rpc.Server, Permissions
+// widgets (S4) — HTML5-виджеты в отдельных процессах:
+// Widget{ID, URL, Rect, Perms, Token} в canvas.State; Manager.Sync (из main
+// loop) запускает/останавливает/сейзит/усыпляет рендереры; каждый виджет —
+// СВОЙ headless Chromium (CDP по WebSocket, coder/websocket, pure Go);
+// паника/крах процесса → backoff-перезапуск (паттерн Supervisor).
+// IPC: Request{Token, Cmd, Args} → Handler: 1) токен 2) ЗАКРЫТЫЙ белый
+// список (notify/add_card/move_card/read_file/set_clip/ping)
+// 3) Permission (canvas_write/notify/fs_read) 4) хук CompositorAPI.
+// Ввод: HitAt(widgets, cam, vpW, vpH, screen) — screen→canvas (обратный
+// зум) → topmost виджет → локальные координаты.
+// dnd (S4) — Manager: Start/Move/Drop/Cancel; Payload{MIME, Data}
+// сохраняется 1:1 до цели (Canvas/Card/Widget/Window); Drop идемпотентен.
+
+// Планируемые (Спринт 5):
 // control.ConfigManager — sync.RWMutex + подписчики hot-reload
 ```
 
@@ -254,7 +266,7 @@ Snapping: для каждой пары кромок (L↔L, R↔L, L↔R, R↔R;
 | 2.8 | Integration | headless-события → InputProcessor → main loop | full pipeline клавиатуры без дисплея |
 | 2.9 | Integration | WaylandBackend: 2 клиента, фокус, геометрия | окна живут в глобальных координатах |
 
-### Спринт 3 — Медиа, звук, контекст ✅ (текущий)
+### Спринт 3 — Медиа, звук, контекст ✅
 Задачи: WallpaperManager (GIF/видео/шейдер), AudioManager (WAV/OGG Chrome OS Flex),
 карточки Live Preview, контекстные меню (оверлей-слой), жесты трекпада.
 
@@ -273,19 +285,24 @@ Snapping: для каждой пары кромок (L↔L, R↔L, L↔R, R↔R;
 DND-дроп → карточка в ядре (`TestDroppedFileBecomesCard`), звуковой hook
 (`TestSoundHookMapping`), звуковая схема Chrome OS Flex в `assets/sounds`.
 
-### Спринт 4 — DND и HTML5-виджеты
+### Спринт 4 — DND и HTML5-виджеты ✅ (текущий)
 Задачи: WidgetManager (CDP), проброс ввода с учётом зума, IPC-безопасность
-(токены, белый список), wl_data_device DND, карточки из дропов.
+(токены, белый список), DND-машина, карточки из дропов.
 
 | # | Уровень | Тест-кейс | Ожидание |
 |---|---|---|---|
-| 4.1 | Unit | координата курсора → canvas → CDP (обратный зум) | клик в виджет при zoom 0.5 попадает в цель |
-| 4.2 | Unit | RPC: белый список команд, чужой токен | недопустимая команда отклоняется |
-| 4.3 | Unit | Permissions: canvas_write/notify/fs_read | нарушение права → отказ |
-| 4.4 | Unit | крах CDP-процесса | рестарт виджета, ядро живо |
-| 4.5 | Unit | DND: источник→цель (Canvas/Card/Window) | тип данных сохраняется, дроп идемпотентен |
-| 4.6 | Integration | дроп файла из окна на холст | создаётся карточка Live Preview |
-| 4.7 | Integration | 2 виджета + окно, панорама холста | ввод роутится по фрустуму, сон виджетов работает |
+| 4.1 | Unit | `TestHitAtReverseZoom` | screen→canvas→local при зуме 0.5/2: клик в виджет попадает в цель |
+| 4.2 | Unit | `TestRPCWrongToken`, `TestRPCWhitelist` | чужой токен и команда вне белого списка отклоняются |
+| 4.3 | Unit | `TestRPCPermissions` | нет права → отказ без исполнения хука |
+| 4.4 | Integration | `TestRendererCrashIsolatedAndRestarted`, `TestCDPProcessCrashRestart` | паника фейка и kill реального CDP-процесса → backoff-перезапуск, ядро живо |
+| 4.5 | Unit | `TestDragDropPreservesData`, `TestDropIdempotent` | MIME-данные 1:1, повторный дроп — no-op |
+| 4.6 | Integration | `TestDroppedFileBecomesCard` (S3) | дроп файла → карточка Live Preview в точке падения |
+| 4.7 | Integration | `TestWidgetsSleepOutsideFrustum`, `TestPanoramaSleepsWidgetsAndRoutesInput` | виджеты вне фрустума спят, ввод роутится в видимый |
+
+Дополнительно: `TestCDPLoadAndFrame` — реальный браузер (Electron как
+Chromium) по CDP: навигация, скриншот-кадр 320×200 с фоном страницы;
+`TestWidgetLifecycleEvents` — create/move/remove через шину; сессия
+сохраняет виджеты (WidgetSnapshot) с НЕподъемом прав из чужого JSON.
 
 ### Спринт 5 — Оптимизация и конфигуратор
 Задачи: culling + сон окон (frame-suspension), горячие настройки Control Center

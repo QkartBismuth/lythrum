@@ -13,6 +13,7 @@ import (
 	"lythrum/internal/preview"
 	"lythrum/internal/render"
 	"lythrum/internal/session"
+	"lythrum/internal/widgets"
 )
 
 // WID — идентификатор окна (Wayland surface id).
@@ -39,7 +40,8 @@ type State struct {
 	nextID  WID
 	guides  []core.Guide
 
-	cards map[string]*preview.Card // карточки Live Preview по id
+	cards   map[string]*preview.Card   // карточки Live Preview по id
+	widgets map[string]*widgets.Widget // HTML5-виджеты по id
 }
 
 // New создаёт холст с вьюпортом vpW×vpH и дефолтной камерой.
@@ -51,7 +53,53 @@ func New(vpW, vpH float64) *State {
 		SnapThresholdPx: core.DefaultSnapThresholdPx,
 		windows:         make(map[WID]*Window),
 		cards:           make(map[string]*preview.Card),
+		widgets:         make(map[string]*widgets.Widget),
 	}
+}
+
+// ── HTML5-виджеты (Спринт 4) ────────────────────────────────────────────
+
+// AddWidget регистрирует виджет на холсте.
+func (s *State) AddWidget(w *widgets.Widget) { s.widgets[w.ID] = w }
+
+// Widget возвращает виджет по id.
+func (s *State) Widget(id string) (*widgets.Widget, bool) {
+	w, ok := s.widgets[id]
+	return w, ok
+}
+
+// Widgets — виджеты в стабильном порядке (по id).
+func (s *State) Widgets() []*widgets.Widget {
+	ids := make([]string, 0, len(s.widgets))
+	for id := range s.widgets {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*widgets.Widget, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, s.widgets[id])
+	}
+	return out
+}
+
+// RemoveWidget убирает виджет с холста.
+func (s *State) RemoveWidget(id string) bool {
+	if _, ok := s.widgets[id]; !ok {
+		return false
+	}
+	delete(s.widgets, id)
+	return true
+}
+
+// MoveWidget перемещает виджет.
+func (s *State) MoveWidget(id string, pos core.Vec2) bool {
+	w, ok := s.widgets[id]
+	if !ok {
+		return false
+	}
+	w.Rect.X = pos.X
+	w.Rect.Y = pos.Y
+	return true
 }
 
 // ── Карточки Live Preview (Спринт 3) ────────────────────────────────────
@@ -245,6 +293,21 @@ func (s *State) ToSnapshot() session.Snapshot {
 			H:     c.Rect.H,
 		})
 	}
+	for _, wg := range s.Widgets() {
+		perms := make([]string, 0, len(wg.Perms.List()))
+		for _, p := range wg.Perms.List() {
+			perms = append(perms, string(p))
+		}
+		snap.Widgets = append(snap.Widgets, session.WidgetSnapshot{
+			ID:    wg.ID,
+			URL:   wg.URL,
+			X:     wg.Rect.X,
+			Y:     wg.Rect.Y,
+			W:     wg.Rect.W,
+			H:     wg.Rect.H,
+			Perms: perms,
+		})
+	}
 	return snap
 }
 
@@ -278,4 +341,31 @@ func Restore(s *State, snap session.Snapshot) {
 		}
 		s.AddCard(card)
 	}
+	for _, ws := range snap.Widgets {
+		// Права виджета из сессии не «поднимаются»: интерпретируем только
+		// известные имена, неизвестные отбрасываем (защита от чужого JSON).
+		perms := widgets.NewPermissions()
+		for _, p := range ws.Perms {
+			if pp := widgets.Permission(p); isKnownPerm(pp) {
+				perms[pp] = true
+			}
+		}
+		s.AddWidget(&widgets.Widget{
+			ID:    ws.ID,
+			URL:   ws.URL,
+			Rect:  core.Rect{X: ws.X, Y: ws.Y, W: ws.W, H: ws.H},
+			Perms: perms,
+			Token: core.NewToken(), // новый токен: старый мог утечь на диск
+		})
+	}
+}
+
+// isKnownPerm — право входит в белый набор разрешений.
+func isKnownPerm(p widgets.Permission) bool {
+	for _, k := range widgets.AllPermissions() {
+		if k == p {
+			return true
+		}
+	}
+	return false
 }

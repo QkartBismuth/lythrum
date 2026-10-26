@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"lythrum/internal/audio"
 	"lythrum/internal/canvas"
 	"lythrum/internal/core"
+	"lythrum/internal/dnd"
 	"lythrum/internal/input"
 	"lythrum/internal/kernel"
 	"lythrum/internal/module"
@@ -25,6 +27,7 @@ import (
 	"lythrum/internal/server"
 	"lythrum/internal/session"
 	"lythrum/internal/wallpaper"
+	"lythrum/internal/widgets"
 )
 
 func main() {
@@ -95,6 +98,19 @@ func run() error {
 	// Побочные эффекты ядра: раскладка/питание/дроп → звук.
 	k.Hook = audio.SoundHook(am)
 
+	// ── Виджеты: HTML5 в отдельных процессах (CDP) ──
+	// Браузера нет → заглушки: композитор жив, виджеты рисуются плашками.
+	widgetFactory := widgets.RendererFactory(widgets.CDPFactory{}.Build)
+	if _, err := (widgets.CDPFactory{}).FindBrowser(); err != nil {
+		log.Printf("widgets: браузер не найден (%v) — виджеты рисуются заглушками", err)
+		widgetFactory = widgets.NullFactory
+	}
+	wm := widgets.NewManager(widgetFactory)
+	sup.Go(wm)
+
+	// ── DND: перетаскивание файлов и данных ──
+	var dndMgr dnd.Manager
+
 	// Автосейв: раз в 10 с и при завершении — событием в шину, чтобы запись
 	// шла из main loop (владельца состояния), без гонок за снапшотом.
 	sup.Go(module.NewFunc("session.autosave", func(ctx context.Context) error {
@@ -127,16 +143,32 @@ func run() error {
 		select {
 		case <-ctx.Done():
 			k.SaveSession()
+			wm.Stop()
 			return nil
 
 		case ev := <-bus.C:
 			if k.Apply(ev) {
 				k.SaveSession()
+				wm.Stop()
 				return nil
+			}
+			// DND: дроп файла на холст → карточка уже в Apply; здесь
+			// менеджер DND просто прощается с завершённым drag'ом.
+			if ev.Type == module.EvDroppedFile {
+				dndMgr.Drop(dnd.Target{Kind: dnd.TargetCanvas, At: ev.Vec})
 			}
 
 		case <-ticker.C:
 			k.Tick(16 * time.Millisecond.Seconds())
+
+			// Синхронизация рендереров виджетов с состоянием холста:
+			// запуск/останов по дельте + сон вне фрустума (тест 4.7).
+			all := state.Widgets()
+			wm.Sync(all)
+			fr := state.Cam.Frustum(state.ViewportW, state.ViewportH)
+			for _, wg := range all {
+				wm.SetSleep(wg.ID, !fr.Intersects(wg.Rect))
+			}
 		}
 	}
 }

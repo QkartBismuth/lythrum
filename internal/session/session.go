@@ -44,12 +44,25 @@ type CardSnapshot struct {
 	H     float64 `json:"h"`
 }
 
+// WidgetSnapshot — сериализуемый HTML5-виджет. Права восстанавливаются
+// из белого списка по умолчанию: сессия не может поднять себе права.
+type WidgetSnapshot struct {
+	ID    string   `json:"id"`
+	URL   string   `json:"url"`
+	X     float64  `json:"x"`
+	Y     float64  `json:"y"`
+	W     float64  `json:"w"`
+	H     float64  `json:"h"`
+	Perms []string `json:"perms"`
+}
+
 // Snapshot — полное состояние сессии.
 type Snapshot struct {
 	Version int              `json:"version"`
 	Camera  CameraSnapshot   `json:"camera"`
 	Windows []WindowSnapshot `json:"windows"`
 	Cards   []CardSnapshot   `json:"cards,omitempty"`
+	Widgets []WidgetSnapshot `json:"widgets,omitempty"`
 }
 
 // Manager владеет файлом сессии. Потокобезопасен: автосейв-горутина и

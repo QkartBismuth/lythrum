@@ -14,6 +14,7 @@ import (
 	"lythrum/internal/module"
 	"lythrum/internal/preview"
 	"lythrum/internal/session"
+	"lythrum/internal/widgets"
 )
 
 // CameraTweenDuration — длительность плавного центрирования камеры (Meta/Alt+Tab).
@@ -121,6 +122,18 @@ func (k *Kernel) Apply(ev module.Event) bool {
 		s.MoveCard(ev.Str, ev.Vec)
 	case module.EvCardRemove:
 		s.RemoveCard(ev.Str)
+
+	// ── HTML5-виджеты (Спринт 4) ──
+	case module.EvWidgetCreate:
+		// Виджет создаётся по URL с дефолтным размером; права — по умолчанию
+		// минимальные (notify): поднять их можно только из Control Center.
+		s.AddWidget(widgets.New(ev.Str, core.Rect{
+			X: ev.Vec.X, Y: ev.Vec.Y, W: 480, H: 360,
+		}, widgets.PermNotify))
+	case module.EvWidgetRemove:
+		s.RemoveWidget(ev.Str)
+	case module.EvWidgetMove:
+		s.MoveWidget(ev.Str, ev.Vec)
 
 	// ── Заготовки подсистем Спринтов 4–5: оверлей-UI и звук (S3),
 	// виджеты (S4), Control Center (S5) ──

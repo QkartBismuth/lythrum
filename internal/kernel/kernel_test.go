@@ -13,7 +13,9 @@ import (
 	"lythrum/internal/core"
 	"lythrum/internal/input"
 	"lythrum/internal/module"
+	"lythrum/internal/render"
 	"lythrum/internal/session"
+	"lythrum/internal/widgets"
 )
 
 // harness — интеграционный стенд: InputProcessor → шина → Kernel (2.8).
@@ -253,5 +255,87 @@ func writeTestPNG(t *testing.T, path string, w, h int) {
 	defer f.Close()
 	if err := png.Encode(f, img); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// 4.4/4.7 (ядро) — события виджетов: create → move → remove.
+func TestWidgetLifecycleEvents(t *testing.T) {
+	h := newHarness(t)
+
+	url := "file:///tmp/counter.html"
+	h.bus.Publish(module.Event{Type: module.EvWidgetCreate, Str: url, Vec: core.Vec2{X: 40, Y: 50}})
+	h.pipe()
+
+	ws := h.k.State.Widgets()
+	if len(ws) != 1 {
+		t.Fatalf("виджетов: %d, want 1", len(ws))
+	}
+	w := ws[0]
+	if w.URL != url || w.Rect.X != 40 || w.Rect.Y != 50 {
+		t.Fatalf("поля виджета: %+v", w)
+	}
+	if w.Token == "" {
+		t.Fatal("IPC-токен пуст — виджет не сможет аутентифицироваться")
+	}
+
+	// Перемещение.
+	h.bus.Publish(module.Event{Type: module.EvWidgetMove, Str: w.ID, Vec: core.Vec2{X: 10, Y: 10}})
+	h.pipe()
+	if moved, _ := h.k.State.Widget(w.ID); moved.Rect.X != 10 || moved.Rect.Y != 10 {
+		t.Fatalf("виджет не переместился: %v", moved.Rect)
+	}
+
+	// Удаление.
+	h.bus.Publish(module.Event{Type: module.EvWidgetRemove, Str: w.ID})
+	h.pipe()
+	if len(h.k.State.Widgets()) != 0 {
+		t.Fatal("виджет не удалён")
+	}
+}
+
+// 4.7 — панорама: виджеты вне фрустума помечаются спящими; ввод роутится
+// только в видимый виджет.
+func TestPanoramaSleepsWidgetsAndRoutesInput(t *testing.T) {
+	h := newHarness(t)
+
+	// Два виджета по горизонтали, окно между ними.
+	a := widgets.New("file:///a.html", core.Rect{X: 0, Y: 0, W: 200, H: 200}, widgets.PermNotify)
+	b := widgets.New("file:///b.html", core.Rect{X: 3000, Y: 0, W: 200, H: 200})
+	h.k.State.AddWidget(a)
+	h.k.State.AddWidget(b)
+	h.k.State.AddWindow("Terminal", core.Rect{X: 600, Y: 0, W: 400, H: 300})
+
+	// Камера в дефолте: a видим (0..1920), b — далеко за фрустумом.
+	cam := h.k.State.Cam
+	for _, wg := range h.k.State.Widgets() {
+		sleep := render.ShouldSleep(cam, h.k.State.ViewportW, h.k.State.ViewportH, wg.Rect)
+		if wg.ID == a.ID && sleep {
+			t.Fatal("виджет a в фрустуме — не должен спать")
+		}
+		if wg.ID == b.ID && !sleep {
+			t.Fatal("виджет b за фрустумом — должен спать")
+		}
+	}
+
+	// Ввод по экрану: клик по виджету a (зум 1: экран == холст).
+	hit, local, ok := widgets.HitAt(h.k.State.Widgets(), cam, 1920, 1080, core.Vec2{X: 100, Y: 50})
+	if !ok || hit.ID != a.ID || local.X != 100 || local.Y != 50 {
+		t.Fatalf("ввод не попал в виджет a: %v %+v ok=%v", hit, local, ok)
+	}
+
+	// Панорама вправо на 3000: теперь b в фрустуме, a — нет.
+	h.k.State.Cam.X = 3000
+	cam = h.k.State.Cam
+	if !render.ShouldSleep(cam, 1920, 1080, a.Rect) {
+		t.Fatal("после панорамы a должен спать")
+	}
+	if render.ShouldSleep(cam, 1920, 1080, b.Rect) {
+		t.Fatal("после панорамы b должен быть видим")
+	}
+
+	// Ввод теперь попадает в b.
+	hit, _, ok = widgets.HitAt(h.k.State.Widgets(), cam, 1920, 1080, core.Vec2{X: 200, Y: 50})
+	if !ok || hit.ID != b.ID {
+		t.Fatalf("после панорамы ввод должен идти в b: %v ok=%v", hit, ok)
 	}
 }

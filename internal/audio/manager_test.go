@@ -107,8 +107,8 @@ func TestManagerPlaysScheme(t *testing.T) {
 	defer cancel()
 	go func() { _ = m.Run(ctx) }() // очередь живёт до таймаута
 
-	// Ждём, пока оба звука будут обслужены.
-	deadline := time.Now().Add(time.Second)
+	// Ждём, пока оба звука будут обслужены (запас под медленный CI).
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if p.count() >= 2 {
 			break
