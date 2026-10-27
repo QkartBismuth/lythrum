@@ -62,6 +62,16 @@ func NewProcessor(pub Publisher, layout *LayoutMachine) *InputProcessor {
 		{Mods: ModMeta, Key: KeyUp}:    actDir(module.EvTile, core.DirUp),
 		{Mods: ModMeta, Key: KeyDown}:  actDir(module.EvTile, core.DirDown),
 
+		// ── Навигация оверлеев (Спринт 6): стрелки/Enter/Esc без модов.
+		// Ядро игнорирует их при закрытом оверлее — клиентские поверхности
+		// получают клавиатуру напрямую, когда она захвачена ими.
+		{Mods: 0, Key: KeyLeft}:   actDir(module.EvMenuNav, core.DirLeft),
+		{Mods: 0, Key: KeyRight}:  actDir(module.EvMenuNav, core.DirRight),
+		{Mods: 0, Key: KeyUp}:     actDir(module.EvMenuNav, core.DirUp),
+		{Mods: 0, Key: KeyDown}:   actDir(module.EvMenuNav, core.DirDown),
+		{Mods: 0, Key: KeyEnter}:  act(module.EvMenuActivate),
+		{Mods: 0, Key: KeyEscape}: act(module.EvMenuClose),
+
 		// ── Мультимедийные Fn-клавиши ──
 		{Mods: 0, Key: KeyXF86AudioRaiseVolume}:  actNum(module.EvVolume, 5),
 		{Mods: 0, Key: KeyXF86AudioLowerVolume}:  actNum(module.EvVolume, -5),

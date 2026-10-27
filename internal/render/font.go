@@ -7,6 +7,8 @@ package render
 
 import (
 	"fmt"
+	"image"
+	"image/color"
 	"os"
 	"path/filepath"
 	"time"
@@ -92,6 +94,95 @@ func (f *Face) HasGlyph(r rune) bool {
 func (f *Face) Size() float64 { return f.size }
 
 func fixedToPx(v fixed.Int26_6) float64 { return float64(v) / 64 }
+
+// DrawText рисует строку s в dst с левым верхним углом в (x, y) цветом c
+// (обычная over-композиция, не-premultiplied источник). Возвращает
+// продвинутую ширину строки в пикселях. Face НЕ потокобезопасен —
+// вызывается из main loop (владельца кадра).
+func (f *Face) DrawText(dst *image.RGBA, x, y float64, s string, c color.RGBA) float64 {
+	if s == "" {
+		return 0
+	}
+	ascent := f.face.Metrics().Ascent
+	start := fixed.Int26_6(x * 64)
+	dot := fixed.Point26_6{X: start, Y: fixed.Int26_6(y*64) + ascent}
+	var prev rune = -1
+	for _, r := range s {
+		if prev >= 0 {
+			dot.X += f.face.Kern(prev, r)
+		}
+		dr, mask, maskp, adv, ok := f.face.Glyph(dot, r)
+		if ok {
+			blitGlyph(dst, dr, mask, maskp, c)
+		}
+		dot.X += adv
+		prev = r
+	}
+	return fixedToPx(dot.X - start)
+}
+
+// DrawTextClip — DrawText с обрезкой по правому краю: глифы, выходящие
+// за maxRight, не рисуются (заголовки окон и меню). Возвращает ширину
+// нарисованной части.
+func (f *Face) DrawTextClip(dst *image.RGBA, x, y float64, s string, c color.RGBA, maxRight float64) float64 {
+	ascent := f.face.Metrics().Ascent
+	start := fixed.Int26_6(x * 64)
+	dot := fixed.Point26_6{X: start, Y: fixed.Int26_6(y*64) + ascent}
+	var prev rune = -1
+	for _, r := range s {
+		if prev >= 0 {
+			dot.X += f.face.Kern(prev, r)
+		}
+		dr, mask, maskp, adv, ok := f.face.Glyph(dot, r)
+		if ok && float64(dr.Max.X) > maxRight {
+			break // следующий глиф не влезает — обрезка
+		}
+		if ok {
+			blitGlyph(dst, dr, mask, maskp, c)
+		}
+		dot.X += adv
+		prev = r
+	}
+	return fixedToPx(dot.X - start)
+}
+
+// blitGlyph — закраска маски глифа цветом c в dst (over-композиция).
+func blitGlyph(dst *image.RGBA, dr image.Rectangle, mask image.Image, maskp image.Point, c color.RGBA) {
+	for py := dr.Min.Y; py < dr.Max.Y; py++ {
+		for px := dr.Min.X; px < dr.Max.X; px++ {
+			ma := alphaAt(mask, px-dr.Min.X+maskp.X, py-dr.Min.Y+maskp.Y)
+			if ma == 0 {
+				continue
+			}
+			i := dst.PixOffset(px, py)
+			sa := uint32(ma) // 0..255
+			for ch := 0; ch < 4; ch++ {
+				var src uint8
+				switch ch {
+				case 0:
+					src = c.R
+				case 1:
+					src = c.G
+				case 2:
+					src = c.B
+				case 3:
+					src = c.A
+				}
+				d := uint32(dst.Pix[i+ch])
+				dst.Pix[i+ch] = uint8((uint32(src)*sa + d*(255-sa)) / 255)
+			}
+		}
+	}
+}
+
+// alphaAt читает альфу из маски глифа (быстрый путь image.Alpha).
+func alphaAt(mask image.Image, x, y int) uint8 {
+	if a, ok := mask.(*image.Alpha); ok {
+		return a.AlphaAt(x, y).A
+	}
+	r, g, b, _ := mask.At(x, y).RGBA()
+	return uint8((r + g + b) >> 16) // светимость как альфа (запасной путь)
+}
 
 // fontHealthWatchdog — план Спринта 5: деградация при недоступных шрифтах
 // (fallback на встроенный bitmap-шрифт) остаётся за оверлей-слоём; ядро

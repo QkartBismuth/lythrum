@@ -7,6 +7,7 @@ package kernel
 
 import (
 	"encoding/json"
+	"image"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,7 +17,9 @@ import (
 	"lythrum/internal/module"
 	"lythrum/internal/palette"
 	"lythrum/internal/preview"
+	"lythrum/internal/render"
 	"lythrum/internal/session"
+	"lythrum/internal/ui"
 	"lythrum/internal/widgets"
 )
 
@@ -41,6 +44,38 @@ type Kernel struct {
 	// из main loop; nil — отключён. Держится вне Apply, чтобы ядро
 	// не зависело от аудио-подсистемы.
 	Hook func(ev module.Event)
+
+	// OnVolume — громкость схемы 0–100 (Fn-клавиши, Control Center).
+	// Заполняет main.go (AudioManager + ConfigManager); nil — тихо игнор.
+	OnVolume func(v int)
+
+	// OnMute — переключение mute (Fn-клавиша, Control Center).
+	OnMute func()
+
+	// Pub — своя шина: ядро публикует события-эффекты (оверлеи, акценты).
+	// nil — эффекты тихо пропускаются (юнит-тесты).
+	Pub module.Publisher
+
+	// Face — шрифт кадра (nil → рамки без текста, композитор работает
+	// даже без assets).
+	Face *render.Face
+
+	// Screenshot — приёмник кадров скриншота (main пишет PNG); nil — игнор.
+	Screenshot func(img image.Image)
+
+	// ControlValues — громкость/mute схемы для Control Center (audio+config).
+	ControlValues func() (volume int, muted bool)
+
+	// Statuses — статусы модулей для диспетчера задач (Supervisor).
+	Statuses func() []module.Status
+
+	// ── Оверлей-UI (Спринт 6): владелец — main loop ──
+	overlay     *ui.MenuStack // стек открытых меню
+	clipHistory []string      // история буфера (новые сверху)
+	accentIdx   int           // текущий пресет акцента
+	// Clipboard — активный буфер композитора (set_clip и выбор из истории;
+	// wayland-буфер появится вместе с реальными клиентами).
+	Clipboard string
 }
 
 // New собирает ядро поверх холста и менеджера сессии.
@@ -92,6 +127,11 @@ func (k *Kernel) Apply(ev module.Event) bool {
 				CameraTweenDuration,
 			)
 		}
+	case module.EvCloseWindow:
+		// Alt+F4: закрыть фокусированное окно; фокус переезжает сам
+		// (RemoveWindow). Свёрнутое окно под фокусом закрывается тоже —
+		// это честное «закрой текущее».
+		s.RemoveWindow(s.Focus)
 
 	// ── Сессия ──
 	case module.EvSessionSave:
@@ -153,15 +193,64 @@ func (k *Kernel) Apply(ev module.Event) bool {
 			os.Stderr.WriteString("lythrum: palette: неизвестные роли: " +
 				strings.Join(unknown, ", ") + "\n")
 		}
+		k.refreshControlCenter()
 	case module.EvSnapThreshold:
 		s.SnapThresholdPx = ev.Num
+		k.refreshControlCenter()
 
-	// ── Заготовки подсистем Спринтов 4–5: оверлей-UI и звук (S3),
-	// виджеты (S4), Control Center (S5) ──
-	case module.EvLayoutChanged, module.EvToggleSearch, module.EvPowerOverlay,
-		module.EvOpenControlCenter, module.EvRunDialog, module.EvTaskManager,
-		module.EvCloseWindow, module.EvClipboardHistory, module.EvScreenshot,
-		module.EvSnip, module.EvVolume, module.EvVolumeMute, module.EvBrightness:
+	// ── Громкость: применение делегировано хукам (audio + config) ──
+	case module.EvVolume:
+		// ev.Num — шаг (±5): Fn-клавиши и панель CC шлют дельту.
+		if k.OnVolume != nil {
+			k.OnVolume(int(ev.Num))
+		}
+		k.refreshControlCenter()
+	case module.EvVolumeMute:
+		if k.OnMute != nil {
+			k.OnMute()
+		}
+		k.refreshControlCenter()
+
+	// ── Отложено (Спринт 7+): text-input для строк ввода, ──
+	// ── backlight-протокол для яркости                      ──
+	case module.EvToggleSearch, module.EvRunDialog, module.EvBrightness:
+		os.Stderr.WriteString("lythrum: " + string(ev.Type) +
+			": отложено — нужен text-input/backlight (см. ARCHITECTURE.md)\n")
+
+	// ── Оверлей-UI (Спринт 6): стек меню поверх кадра ──
+	case module.EvPowerOverlay:
+		k.OpenOverlay(ui.PowerOverlay())
+	case module.EvOpenControlCenter:
+		k.OpenOverlay(k.ControlCenterMenu())
+	case module.EvTaskManager:
+		k.OpenOverlay(k.TaskManagerMenu())
+	case module.EvClipboardHistory:
+		k.OpenOverlay(k.ClipboardMenu())
+	case module.EvMenuNav:
+		k.HandleMenuNav(ev.Dir)
+	case module.EvMenuActivate:
+		k.ActivateOverlayItem()
+	case module.EvMenuClose:
+		if k.overlay != nil {
+			k.overlay.Pop()
+			if k.overlay.Top() == nil {
+				k.overlay = nil // стек опустел — оверлей-режим выключен
+			}
+		}
+	case module.EvClipboardPush:
+		// Виджет положил текст в буфер (set_clip): копим историю.
+		if ev.Str != "" {
+			k.clipHistory = append([]string{ev.Str}, k.clipHistory...)
+			if len(k.clipHistory) > ClipboardHistoryCap {
+				k.clipHistory = k.clipHistory[:ClipboardHistoryCap]
+			}
+		}
+	case module.EvScreenshot, module.EvSnip:
+		// Скриншот и «снип» (пока — весь кадр; выбор области придёт вместе
+		// с text-input). Рендер здесь, запись — в хуке main.go.
+		if k.Screenshot != nil {
+			k.Screenshot(k.Frame())
+		}
 	}
 	return false
 }

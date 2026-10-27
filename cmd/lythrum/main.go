@@ -9,10 +9,14 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"image"
+	"image/png"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +29,7 @@ import (
 	"lythrum/internal/kernel"
 	"lythrum/internal/module"
 	"lythrum/internal/palette"
+	"lythrum/internal/render"
 	"lythrum/internal/server"
 	"lythrum/internal/session"
 	"lythrum/internal/wallpaper"
@@ -80,10 +85,25 @@ func run() error {
 
 	// ── Ядро: применение событий к холсту ──
 	k := kernel.New(state, sess)
+	k.Pub = bus // оверлеи и акценты публикуют эффекты обратно в шину
 
 	// ── Supervisor модулей ──
 	sup := module.NewSupervisor(ctx)
 	defer sup.Stop()
+
+	// Watchdog: главный цикл бьёт сердце каждый тик; зависание дольше 5 с —
+	// аварийный выход (лаунчер перезапустит; сессия — от последнего автосейва).
+	var heart atomic.Int64
+	heart.Store(time.Now().UnixNano())
+	sup.Go(module.NewWatchdog(
+		func() time.Time { return time.Unix(0, heart.Load()) },
+		5*time.Second,
+		func(lag time.Duration) {
+			os.Stderr.WriteString(fmt.Sprintf(
+				"lythrum: main loop завис на %v — аварийный выход\n", lag))
+			os.Exit(3)
+		},
+	))
 
 	// Дисплей — модуль: краш бэкенда не роняет ядро (Supervisor перезапустит).
 	sup.Go(module.NewFunc("display.headless", backend.Run))
@@ -105,6 +125,29 @@ func run() error {
 
 	// Побочные эффекты ядра: раскладка/питание/дроп → звук.
 	k.Hook = audio.SoundHook(am)
+
+	// ── Хуки ядра: шрифт, звук, статусы, скриншоты (Спринт 6) ──
+	if face, err := render.LoadFontFile(render.DefaultFontPath(), 13); err == nil {
+		k.Face = face
+	} else {
+		log.Printf("ui: шрифт не загружен (%v) — кадр без текста", err)
+	}
+	// Громкость: событие несёт ШАГ (Fn-клавиши и панель CC); применение —
+	// AudioManager, снапшот — ConfigManager (Control Center показывает факт).
+	k.OnVolume = func(step int) {
+		am.SetVolume(am.Volume() + step)
+		v := am.Volume()
+		cfgMgr.Update(func(c *control.Config) { c.Volume = v })
+	}
+	k.OnMute = func() {
+		m := am.ToggleMute()
+		cfgMgr.Update(func(c *control.Config) { c.Muted = m })
+	}
+	k.ControlValues = func() (int, bool) { return am.Volume(), am.Muted() }
+	k.Statuses = sup.Statuses // диспетчер задач: модули под надзором
+	// Скриншоты: кадр рендерит ядро, запись — здесь (файловая система
+	// не в ядре).
+	k.Screenshot = saveShot
 
 	// ── Виджеты: HTML5 в отдельных процессах (CDP) ──
 	// Браузера нет → заглушки: композитор жив, виджеты рисуются плашками.
@@ -167,6 +210,7 @@ func run() error {
 			}
 
 		case <-ticker.C:
+			heart.Store(time.Now().UnixNano()) // пульс для watchdog'а
 			k.Tick(16 * time.Millisecond.Seconds())
 
 			// Синхронизация рендереров виджетов с состоянием холста:
@@ -191,6 +235,36 @@ func sessionPath() string {
 		base = "."
 	}
 	return base + "/lythrum/session.json"
+}
+
+// saveShot пишет кадр скриншота в PNG. Каталог: LYTHRUM_SHOTS →
+// ~/Pictures → системный tmp. Ошибка — лог, не паника: кадр не стоит
+// сессии композитора.
+func saveShot(img image.Image) {
+	dir := os.Getenv("LYTHRUM_SHOTS")
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, "Pictures")
+		} else {
+			dir = os.TempDir()
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("screenshot: %v", err)
+		return
+	}
+	name := filepath.Join(dir, "lythrum-"+time.Now().Format("2006-01-02-150405")+".png")
+	f, err := os.Create(name)
+	if err != nil {
+		log.Printf("screenshot: %v", err)
+		return
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		log.Printf("screenshot: %v", err)
+		return
+	}
+	log.Printf("screenshot: сохранён %s", name)
 }
 
 // appAssetsDir — каталог ресурсов (звуковая схема, шрифты). Порядок:

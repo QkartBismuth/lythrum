@@ -30,6 +30,7 @@ const (
 	KeySpace
 	KeyTab
 	KeyEscape
+	KeyEnter
 	KeyF4
 	KeyPrint
 	KeyCapsLock

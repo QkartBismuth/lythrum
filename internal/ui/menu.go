@@ -12,9 +12,18 @@ type MenuItem struct {
 	Label     string // текст пункта
 	Shortcut  string // подпись хоткея справа (например, "Ctrl+Shift+S")
 	Icon      string // имя Material Symbol (render.IconGlyph)
+	ID        string // стабильный идентификатор действия (dispatch ядром)
 	Separator bool   // пункт-разделитель (не интерактивен)
 	Disabled  bool
 }
+
+// Теги меню — тип оверлея (dispatch действий ядром).
+const (
+	TagControlCenter = "control_center"
+	TagTaskManager   = "task_manager"
+	TagClipboard     = "clipboard"
+	TagPower         = "power"
+)
 
 // Геометрия меню в экранных пикселях.
 const (
@@ -31,6 +40,7 @@ type Menu struct {
 
 	X, Y float64 // позиция левого верхнего угла на экране
 	W    float64 // ширина (высота вычисляется из items)
+	Tag  string  // тип оверлея (dispatch действий ядром)
 
 	hover int // индекс пункта под курсором/выделенного клавишами
 }
@@ -138,6 +148,19 @@ func (m *Menu) Activate() (label string, ok bool) {
 	return it.Label, true
 }
 
+// ActivateID — как Activate, но возвращает стабильный ID пункта
+// (label меняется со значением, ID — нет).
+func (m *Menu) ActivateID() (string, bool) {
+	if m.hover < 0 || m.hover >= len(m.Items) {
+		return "", false
+	}
+	it := m.Items[m.hover]
+	if !selectable(it) {
+		return "", false
+	}
+	return it.ID, true
+}
+
 // Hover — индекс выделенного пункта (для рендера).
 func (m *Menu) Hover() int { return m.hover }
 
@@ -166,6 +189,13 @@ func (s *MenuStack) Top() *Menu {
 		return nil
 	}
 	return s.stack[len(s.stack)-1]
+}
+
+// All — стек от нижнего к верхнему (для рендера всех открытых меню).
+func (s *MenuStack) All() []*Menu {
+	out := make([]*Menu, len(s.stack))
+	copy(out, s.stack)
+	return out
 }
 
 // Key обрабатывает навигацию клавишами: Up/Down/Enter/Escape.
@@ -198,12 +228,15 @@ func (s *MenuStack) Key(up, down, enter, escape bool) (string, bool) {
 // ── Оверлей питания (клавиша Power) ─────────────────────────────────────
 
 // PowerOverlay — модель меню питания (реиспользует Menu с иконками).
+// ID — стабильные цели dispatch в ядре.
 func PowerOverlay() *Menu {
-	return NewMenu([]MenuItem{
-		{Label: "Заблокировать", Icon: "lock"},
-		{Label: "Выйти", Icon: "logout"},
-		{Label: "Спящий режим", Icon: "bedtime"},
-		{Label: "Перезагрузка", Icon: "restart_alt"},
-		{Label: "Выключение", Icon: "power_settings_new"},
+	m := NewMenu([]MenuItem{
+		{Label: "Заблокировать", Icon: "lock", ID: "lock"},
+		{Label: "Выйти", Icon: "logout", ID: "logout"},
+		{Label: "Спящий режим", Icon: "bedtime", ID: "suspend"},
+		{Label: "Перезагрузка", Icon: "restart_alt", ID: "reboot"},
+		{Label: "Выключение", Icon: "power_settings_new", ID: "poweroff"},
 	})
+	m.Tag = TagPower
+	return m
 }

@@ -54,6 +54,12 @@ const (
 	// Горячие настройки (Спринт 5, Control Center → hot-reload).
 	EvPaletteChanged EventType = "theme.palette_changed" // Str: JSON {"Роль": "#HEX"}
 	EvSnapThreshold  EventType = "canvas.snap_threshold" // Num: порог в экранных px
+
+	// Оверлей-UI и буфер (Спринт 6).
+	EvMenuNav       EventType = "ui.menu_nav"       // Dir: стрелки (±навигация/adjust)
+	EvMenuActivate  EventType = "ui.menu_activate"  // Enter
+	EvMenuClose     EventType = "ui.menu_close"     // Esc
+	EvClipboardPush EventType = "ui.clipboard_push" // Str: текст от set_clip (IPC виджета)
 )
 
 // Event — сообщение шины. Простые поля вместо interface{}: дешёвая передача,
