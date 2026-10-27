@@ -158,6 +158,27 @@ func (s *State) AddWindow(title string, r core.Rect) *Window {
 	return w
 }
 
+// RemoveWindow закрывает окно. Если фокус был на нём — переезжает на другое
+// живое (не свёрнутое) окно; холст без окон остаётся без фокуса (0).
+func (s *State) RemoveWindow(id WID) bool {
+	if _, ok := s.windows[id]; !ok {
+		return false
+	}
+	delete(s.windows, id)
+	if s.Focus != id {
+		return true
+	}
+	// Фокус погиб: ближайшее живое окно по id (стабильный порядок).
+	s.Focus = 0
+	for _, w := range s.Windows() {
+		if !w.Minimized {
+			s.Focus = w.ID
+			break
+		}
+	}
+	return true
+}
+
 // Window возвращает окно по id.
 func (s *State) Window(id WID) (*Window, bool) {
 	w, ok := s.windows[id]

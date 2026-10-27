@@ -118,6 +118,8 @@ type AudioManager struct {
 	cache   map[string]Clip
 	missing map[string]bool // проверенные и не найденные (не спамим диск)
 	drops   int             // неудачные воспроизведения (метрика)
+	volume  int             // 0–100, громкость схемы
+	muted   bool            // mute: аттенюация в ноль, очередь живёт
 
 	queue chan string
 }
@@ -133,8 +135,58 @@ func NewManager(dir string, player Player) *AudioManager {
 		player:  player,
 		cache:   make(map[string]Clip),
 		missing: make(map[string]bool),
+		volume:  75,
 		queue:   make(chan string, 32),
 	}
+}
+
+// ── Громкость (Спринт 6): горячие EvVolume/EvVolumeMute из main loop ──
+
+// SetVolume задаёт громкость схемы 0–100 (вне диапазона — зажим).
+func (m *AudioManager) SetVolume(v int) {
+	m.mu.Lock()
+	m.volume = clampVolume(v)
+	m.mu.Unlock()
+}
+
+// Volume — текущая громкость 0–100.
+func (m *AudioManager) Volume() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.volume
+}
+
+// SetMuted включает/выключает mute. Очередь не очищается: «вернуть звук»
+// продолжает с того места — как в Chrome OS.
+func (m *AudioManager) SetMuted(muted bool) {
+	m.mu.Lock()
+	m.muted = muted
+	m.mu.Unlock()
+}
+
+// ToggleMute инвертирует mute, возвращает новое состояние.
+func (m *AudioManager) ToggleMute() bool {
+	m.mu.Lock()
+	m.muted = !m.muted
+	m.mu.Unlock()
+	return m.muted
+}
+
+// Muted — состояние mute.
+func (m *AudioManager) Muted() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.muted
+}
+
+func clampVolume(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 // Play ставит звук в очередь; неблокирующе (ввод не должен ждать аудио).
@@ -178,12 +230,45 @@ func (m *AudioManager) playNow(name string) {
 		log.Printf("audio: %v", err)
 		return
 	}
+	// Аттенюация ПОСЛЕ кэша: оригинал в cache не трогаем, плееру уходит
+	// копия с коэффициентом. Mute — честная тишина (плеер получает нули).
+	if f := m.gain(); f != 1.0 {
+		clip = attenuate(clip, f)
+	}
 	if err := m.player.Play(clip); err != nil {
 		m.mu.Lock()
 		m.drops++
 		m.mu.Unlock()
 		log.Printf("audio: воспроизведение %q: %v", name, err)
 	}
+}
+
+// gain — коэффициент амплитуды по громкости/mute (под mu).
+func (m *AudioManager) gain() float64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.muted || m.volume == 0 {
+		return 0
+	}
+	return float64(m.volume) / 100
+}
+
+// attenuate масштабирует s16le-сэмплы клипа, возвращая НОВЫЙ буфер.
+// Кэш менеджера остаётся нетронутым — клипы переиспользуются.
+func attenuate(c Clip, factor float64) Clip {
+	out := Clip{Channels: c.Channels, Rate: c.Rate, Data: make([]byte, len(c.Data))}
+	for i := 0; i+1 < len(c.Data); i += 2 {
+		s := int16(uint16(c.Data[i]) | uint16(c.Data[i+1])<<8)
+		v := int(float64(s) * factor)
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		out.Data[i] = byte(int16(v))
+		out.Data[i+1] = byte(int16(v) >> 8)
+	}
+	return out
 }
 
 // clip декодирует (и кэширует) звуковой файл схемы.
