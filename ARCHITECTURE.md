@@ -58,9 +58,9 @@ Lythrum — экспериментальный Wayland-композитор, г�
 2. Модуль падает → `Supervisor` пишет ошибку, ждёт экспоненциальный backoff, рестартит. Ядро живо.
 3. `recover()` в `runOnce()` и в критических точках рендера: паника = ошибка модуля.
 4. Ввод никогда не блокируется: `ChanPublisher.Publish` — неблокирующий (переполнение → сброс события).
-5. Зависание детектится heartbeat'ом (`Healthy()`), watchdog — отложен
-   после Спринта 5: Supervisor покрывает крахи (panic/error → backoff-рестарт),
-   зависшие модули планируются отдельно.
+5. Зависание детектится watchdog'ом (Спринт 6): main loop бьёт сердце
+   каждый тик, отставание > 5 с — onStall (аварийный выход; крахи при этом
+   по-прежнему ловит Supervisor с backoff-рестартом).
 
 ---
 
@@ -170,6 +170,20 @@ type Manager struct{ path string } // атомарная запись: tmp + ren
 // session (S5) — устойчивость: битый JSON = чистая ошибка (не паника),
 // Save поверх восстанавливает; tmp+rename — читатель видит всегда
 // валидный файл, осиротевший .tmp (kill -9 в середине сейва) игнорируется.
+//
+// render (S6) — кадр: Paint(FrameInput, face) — фон/сетка/окна/виджеты/
+// карточки/направляющие; Face.DrawText/DrawTextClip (Geologica, кернинг);
+// PaintOverlay — ui.Menu в экранных пикселях 1:1. FrameInput — плоские
+// снимки состояния: render не импортирует canvas (обратная зависимость
+// запрещена), ядро строит снимок в Kernel.frameInput.
+// kernel (S6) — оверлей-стек: CC (громкость/mute/порог/акценты — значения
+// меняются ТОЛЬКО событиями шины, панель — отображение), диспетчер задач
+// (Supervisor.Statuses), история буфера (cap 10; set_clip → EvClipboardPush),
+// питание (lock/logout/suspend/reboot/poweroff). EvCloseWindow →
+// canvas.RemoveWindow (фокус переезжает). EvScreenshot/EvSnip →
+// Kernel.Frame() → main пишет PNG.
+// module (S6) — Watchdog: пульс main loop (beat/maxLag/onStall) —
+// зависание дольше maxLag = аварийный выход; крахи остаются Supervisor'у.
 ```
 
 ---
@@ -318,7 +332,7 @@ Chromium) по CDP: навигация, скриншот-кадр 320×200 с ф
 `TestWidgetLifecycleEvents` — create/move/remove через шину; сессия
 сохраняет виджеты (WidgetSnapshot) с НЕподъемом прав из чужого JSON.
 
-### Спринт 5 — Оптимизация и конфигуратор ✅ (текущий)
+### Спринт 5 — Оптимизация и конфигуратор ✅
 Задачи: culling + сон окон (frame-suspension), горячие настройки Control Center
 (палитра, порог снапа, жесты, права виджетов), финализация сессий.
 
@@ -337,6 +351,40 @@ Chromium) по CDP: навигация, скриншот-кадр 320×200 с ф
 HEX отсеян, громкость зажата 0–100). Пайплайн горячих настроек: сеттер →
 событие шины (`EvPaletteChanged`/`EvSnapThreshold`/`EvVolume`) → main loop
 → `palette.Apply` (fail-clean пакет) / состояние холста.
+
+### Спринт 6 — Финализация: кадр, оверлеи, сторож ✅ (текущий)
+Задачи: программная растеризация кадра (скриншоты, эталонный вывод),
+доведение системных действий до конца (закрытие окон, громкость, оверлеи),
+watchdog зависаний.
+
+| # | Уровень | Тест-кейс | Ожидание |
+|---|---|---|---|
+| 6.1 | Unit | `TestPaintBackgroundAndWindows`, `TestPaintSkipsMinimized`, `TestPaintZoomScales` | фон = палитра; рамка активного окна цветом `WindowBorderActive`; свёрнутые не рисуются; зум масштабирует окно |
+| 6.2 | Unit | `TestVolumeAttenuation`, `TestMuteSilence`, `TestVolumeConcurrent` | аттенюация честная (½ громкости ≈ ½ амплитуды), mute = нули, кэш не искажается, -race чисто |
+| 6.3 | Unit | `TestRemoveWindowMovesFocus`, `TestRemoveWindowIdempotent`, `TestRemoveWindowKeepsForeignFocus` | Alt+F4: окно закрыто, фокус переехал, повтор — no-op |
+| 6.4 | Unit | `TestPaintTitleText`, `TestPaintGuides`, `TestPaintCardPoster`, `TestPaintOverlay` | заголовки Geologica, направляющие и постеры в цветах палитры, hover меню подсвечен |
+| 6.5 | Integration | `TestControlCenterAdjustsVolume`, `TestControlCenterMuteAndAccent` | CC: стрелка → шаг через шину → подпись обновлена; mute и акцент-пресеты через EvVolumeMute/EvPaletteChanged |
+| 6.6 | Integration | `TestTaskManagerShowsStatuses`, `TestClipboardRingAndMenu`, `TestPowerOverlayDispatch`, `TestScreenshotHook` | статусы модулей в меню; история буфера cap 10, выбор — активный буфер; Power → EvLockSession; скриншот = кадр вьюпорта |
+| 6.7 | Unit | `TestWatchdogDetectsStall`, `TestWatchdogSilentOnFreshBeat` | зависший пульс → onStall один раз на эпизод; свежий пульс — молчание |
+
+Контракт кадра: `Kernel.Frame()` — чистая растеризация снимка состояния
+(`render.FrameInput` — плоские снапшоты, render НЕ импортирует canvas —
+обратная зависимость запрещена). Оверлеи — модели `ui.Menu` в ЭКРАННЫХ
+пикселях поверх кадра; навигация — стрелки/Enter/Esc без модов
+(`EvMenuNav`/`EvMenuActivate`/`EvMenuClose`), при закрытом оверлее ядро
+их игнорирует. Значения CC меняются ТОЛЬКО событиями шины (панель —
+отображение, не владелец).
+
+### Отложено (за рамки 6 спринтов)
+- **text-input**: поиск (Meta+S) и диалог запуска (Meta+R) со строкой
+  ввода, выбор области снипа — нужен протокол text-input-v3 и pointer
+  захват; ядро логирует отложенные события.
+- **Транспорт IPC CDP → Handler**: модель `Request→Handler→CompositorAPI`
+  покрыта тестами; транспорт `Runtime.addBinding` в cdp.go появится
+  вместе с реальными HTML-виджетами.
+- **Backlight**: EvBrightness ждёт backlight-протокол Wayland.
+- **Вывод**: wayland-бэкенд создаёт output'ы, но поверхностный вывод кадров
+  (wl_surface + buffer) — следующий этап; headless-вывод = `Kernel.Frame()`.
 
 ---
 
