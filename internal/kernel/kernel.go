@@ -73,6 +73,7 @@ type Kernel struct {
 	overlay     *ui.MenuStack // стек открытых меню
 	clipHistory []string      // история буфера (новые сверху)
 	accentIdx   int           // текущий пресет акцента
+	dialog      *dialog       // открытый текстовый диалог (поиск/запуск)
 	// Clipboard — активный буфер композитора (set_clip и выбор из истории;
 	// wayland-буфер появится вместе с реальными клиентами).
 	Clipboard string
@@ -211,11 +212,28 @@ func (k *Kernel) Apply(ev module.Event) bool {
 		}
 		k.refreshControlCenter()
 
-	// ── Отложено (Спринт 7+): text-input для строк ввода, ──
-	// ── backlight-протокол для яркости                      ──
-	case module.EvToggleSearch, module.EvRunDialog, module.EvBrightness:
+	// ── Отложено (Спринт 7+): backlight-протокол для яркости ──
+	case module.EvBrightness:
 		os.Stderr.WriteString("lythrum: " + string(ev.Type) +
-			": отложено — нужен text-input/backlight (см. ARCHITECTURE.md)\n")
+			": отложено — нужен backlight (см. ARCHITECTURE.md)\n")
+
+	// ── Текстовые диалоги (Спринт 7): поиск окон, запуск команд ──
+	case module.EvToggleSearch:
+		if k.dialog != nil && k.dialog.kind == dialogSearch {
+			k.dialog = nil // Meta+S повторно — закрыть
+		} else {
+			k.OpenSearch()
+		}
+	case module.EvRunDialog:
+		if k.dialog != nil && k.dialog.kind == dialogRun {
+			k.dialog = nil
+		} else {
+			k.OpenRun()
+		}
+	case module.EvChar:
+		k.HandleChar(ev.Str)
+	case module.EvBackspace:
+		k.HandleBackspace()
 
 	// ── Оверлей-UI (Спринт 6): стек меню поверх кадра ──
 	case module.EvPowerOverlay:
@@ -227,10 +245,29 @@ func (k *Kernel) Apply(ev module.Event) bool {
 	case module.EvClipboardHistory:
 		k.OpenOverlay(k.ClipboardMenu())
 	case module.EvMenuNav:
+		// Диалог: Up/Down — совпадения поиска; иначе — навигация меню.
+		if k.dialog != nil {
+			switch ev.Dir {
+			case core.DirUp:
+				k.CycleMatch(-1)
+			case core.DirDown:
+				k.CycleMatch(1)
+			}
+			return false
+		}
 		k.HandleMenuNav(ev.Dir)
 	case module.EvMenuActivate:
+		if k.dialog != nil {
+			k.ActivateDialog()
+			return false
+		}
 		k.ActivateOverlayItem()
 	case module.EvMenuClose:
+		// Esc: сначала диалог, затем оверлей-стек.
+		if k.dialog != nil {
+			k.CloseDialog()
+			return false
+		}
 		if k.overlay != nil {
 			k.overlay.Pop()
 			if k.overlay.Top() == nil {

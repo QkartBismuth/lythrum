@@ -134,6 +134,19 @@ func (ip *InputProcessor) HandleKeyEvent(ev KeyEvent) {
 			return
 		}
 
+		// Печатаемый символ (Спринт 7): только без Ctrl/Alt/Meta —
+		// сочетания с модификаторами остаются хоткеями/командами клиента.
+		if ev.Mods&(ModCtrl|ModAlt|ModMeta) == 0 {
+			if ev.Key == KeyBackspace {
+				ip.pub.Publish(module.Event{Type: module.EvBackspace})
+				return
+			}
+			if ch, ok := ip.layout.Char(ev.Key, ev.Mods&ModShift != 0); ok {
+				ip.pub.Publish(module.Event{Type: module.EvChar, Str: ch})
+				return
+			}
+		}
+
 	case Release:
 		if ev.Key == KeyMeta {
 			ip.metaDown = false

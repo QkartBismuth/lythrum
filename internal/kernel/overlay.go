@@ -38,6 +38,7 @@ var accentPresets = []accentPreset{
 
 // OpenOverlay открывает оверлей по центру экрана (экранные пиксели 1:1).
 func (k *Kernel) OpenOverlay(m *ui.Menu) {
+	k.dialog = nil // диалог и меню — взаимоисключимы
 	vpW, vpH := k.State.ViewportW, k.State.ViewportH
 	if k.overlay == nil {
 		k.overlay = &ui.MenuStack{}
@@ -286,7 +287,7 @@ func (k *Kernel) refreshControlCenter() {
 	}
 }
 
-// Frame — растеризация кадра: холст + открытые оверлеи. Вызывается из
+// Frame — растеризация кадра: холст + оверлеи + диалог. Вызывается из
 // main loop (скриншоты, вывод) и тестов; состояние — только своё.
 func (k *Kernel) Frame() *image.RGBA {
 	img := render.Paint(k.frameInput(), k.Face)
@@ -294,6 +295,13 @@ func (k *Kernel) Frame() *image.RGBA {
 		for _, m := range k.overlay.All() {
 			render.PaintOverlay(img, m, k.Face)
 		}
+	}
+	if k.dialog != nil {
+		title := "Поиск окон"
+		if k.dialog.kind == dialogRun {
+			title = "Запуск команды"
+		}
+		render.PaintDialog(img, title, k.dialog.text.Value(), k.Face)
 	}
 	return img
 }

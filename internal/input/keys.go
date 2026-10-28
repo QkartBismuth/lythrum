@@ -53,6 +53,45 @@ const (
 	KeyXF86AudioMute
 	KeyXF86MonBrightnessUp
 	KeyXF86MonBrightnessDown
+
+	// Печатаемый ряд (Спринт 7): текстовый ввод диалогов. Реальный
+	// бэкенд скармливает те же keysym'ы через xkbcommon.
+	KeyA
+	KeyB
+	KeyC
+	KeyF
+	KeyG
+	KeyH
+	KeyJ
+	KeyK
+	KeyM
+	KeyN
+	KeyO
+	KeyP
+	KeyQ
+	KeyT
+	KeyU
+	KeyW
+	KeyX
+	KeyY
+	KeyZ
+	// KeyD, KeyE, KeyI, KeyR, KeyS, KeyV, KeyL объявлены выше (хоткеи).
+	Key0
+	Key1
+	Key2
+	Key3
+	Key4
+	Key5
+	Key6
+	Key7
+	Key8
+	Key9
+	KeyMinus
+	KeyEqual
+	KeyComma
+	KeyPeriod
+	KeySlash
+	KeyBackspace
 )
 
 // KeyState — фаза события клавиатуры.

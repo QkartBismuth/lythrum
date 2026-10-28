@@ -245,6 +245,28 @@ func drawGuides(img *image.RGBA, cam core.Camera, guides []core.Guide) {
 	}
 }
 
+// PaintDialog — панель текстового диалога (поиск/запуск): заголовок и
+// строка ввода с кареткой-подчёркиванием. Экранные пиксели 1:1, панель
+// в верхней трети по центру (стиль лаунчера).
+func PaintDialog(img *image.RGBA, title, value string, face *Face) {
+	b := img.Bounds()
+	const panelW, panelH, pad = 560.0, 72.0, 14.0
+	x := float64(b.Max.X)/2 - panelW/2
+	y := float64(b.Max.Y)/3 - panelH/2
+	r := image.Rect(int(x), int(y), int(x+panelW), int(y+panelH))
+	fillRect(img, r, paletteToRGBA(palette.MenuBackground))
+	borderRect(img, r, paletteToRGBA(palette.OverlayAccent))
+
+	if face == nil {
+		return
+	}
+	face.DrawTextClip(img, x+pad, y+pad, title,
+		paletteToRGBA(palette.MenuShortcut), float64(r.Max.X)-pad)
+	// Каретка как подчёркивание на конце значения.
+	face.DrawTextClip(img, x+pad, y+pad+face.Size()+6, value+"_",
+		paletteToRGBA(palette.WindowTitleText), float64(r.Max.X)-pad)
+}
+
 // ── Оверлей-слой ─────────────────────────────────────────────────────────
 
 // PaintOverlay рисует меню поверх кадра в ЭКРАННЫХ пикселях 1:1

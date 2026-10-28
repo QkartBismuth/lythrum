@@ -22,3 +22,6 @@ xvfb*.log
 # Собранные программы оболочки
 /lythrum/lythrum
 /lythrum/fileman/fileman
+
+# Собранный бинарник композитора
+/cmd/lythrum/lythrum

@@ -60,6 +60,10 @@ const (
 	EvMenuActivate  EventType = "ui.menu_activate"  // Enter
 	EvMenuClose     EventType = "ui.menu_close"     // Esc
 	EvClipboardPush EventType = "ui.clipboard_push" // Str: текст от set_clip (IPC виджета)
+
+	// Текстовый ввод (Спринт 7): диалоги поиска и запуска.
+	EvChar      EventType = "ui.char"      // Str: символ (раскладка учтена)
+	EvBackspace EventType = "ui.backspace" // стереть последний символ
 )
 
 // Event — сообщение шины. Простые поля вместо interface{}: дешёвая передача,
