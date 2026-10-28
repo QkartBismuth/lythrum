@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lythrum
+GenericName=Wayland Compositor
+GenericName[ru]=Композитор Wayland
+Comment=Экспериментальная оболочка с бесконечным холстом
+Comment[ru]=Экспериментальная оболочка с бесконечным холстом
+Exec=/usr/local/bin/lythrum
+TryExec=/usr/local/bin/lythrum
+DesktopNames=Lythrum
+Keywords=lythrum;compositor;shell;
