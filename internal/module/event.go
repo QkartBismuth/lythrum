@@ -18,6 +18,7 @@ type EventType string
 // События ядра. Поля Event интерпретируются по Type (комментарий у константы).
 const (
 	EvQuit              EventType = "quit"              // сигнал завершения сессии
+	EvNotify            EventType = "ui.notify"         // Str: текст уведомления (IPC виджета)
 	EvCameraPan         EventType = "camera.pan"        // Vec: дельта в экранных пикселях
 	EvCameraZoomAt      EventType = "camera.zoom_at"    // Vec: точка экрана; Num: множитель
 	EvResetCamera       EventType = "camera.reset"      // одиночный Meta

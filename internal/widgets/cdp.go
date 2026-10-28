@@ -111,6 +111,8 @@ func (f CDPFactory) Build(ctx context.Context, w *Widget) (WidgetRenderer, error
 		port:    port,
 		profile: profile,
 	}
+	r.rctx, r.rcancel = context.WithCancel(context.Background())
+	r.pending = map[int64]chan cdpReply{}
 
 	// Подключение к странице-таргету.
 	if err := r.connect(ctx); err != nil {
@@ -133,6 +135,12 @@ func freePort() (int, error) {
 // ── CDPRenderer ─────────────────────────────────────────────────────────
 
 // CDPRenderer — рендерер одного виджета поверх CDP-соединения.
+//
+// Модель конкурентности: единственная горутина-читатель (readLoop)
+// ВЛАДЕЕТ conn.Read; все остальные шлют запросы call()'ом и ждут
+// future по id. Это демультиплексирует события браузера
+// (Runtime.bindingCalled — транспорт IPC-команд страницы), которые
+// наивное «читать до ответа» выбрасывало.
 type CDPRenderer struct {
 	bin     string
 	cmd     *exec.Cmd
@@ -141,7 +149,24 @@ type CDPRenderer struct {
 
 	conn *websocket.Conn
 	next atomic.Int64
-	mu   sync.Mutex // сериализация запрос-ответ по WS
+
+	writeMu sync.Mutex // сериализация записей в WS (чтение — у readLoop)
+
+	pendingMu sync.Mutex
+	pending   map[int64]chan cdpReply // id → future ответа
+
+	ipcHook atomic.Value // func(string): IPC-команда страницы (payload JSON)
+
+	rctx    context.Context    // жизнь читателя и всех вызовов
+	rcancel context.CancelFunc // Close() отменяет читателя
+
+	closed atomic.Bool // защита от двойного Close
+}
+
+// cdpReply — разрешённый future call()'а.
+type cdpReply struct {
+	result json.RawMessage
+	err    error
 }
 
 // cdpTarget — элемент /json/list.
@@ -197,12 +222,16 @@ func (r *CDPRenderer) connect(ctx context.Context) error {
 		return fmt.Errorf("widgets: ws-диал: %w", err)
 	}
 	r.conn = conn
+
+	// Единственный читатель сокета: разруливает ответы и события.
+	go r.readLoop()
 	return nil
 }
 
-// call — CDP-запрос с ожиданием ответа по id.
+// call — CDP-запрос с ожиданием ответа по id (future из pending).
+// Запись под мьютексом; чтение делает readLoop и разрешает future.
 func (r *CDPRenderer) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	if r.conn == nil {
+	if r.conn == nil || r.closed.Load() {
 		return nil, errors.New("widgets: соединение закрыто")
 	}
 	id := r.next.Add(1)
@@ -211,40 +240,110 @@ func (r *CDPRenderer) call(ctx context.Context, method string, params any) (json
 		return nil, err
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	ch := make(chan cdpReply, 1) // буфер 1: читатель не блокируется, даже если нас бросили
+	r.pendingMu.Lock()
+	r.pending[id] = ch
+	r.pendingMu.Unlock()
+	drop := func() {
+		r.pendingMu.Lock()
+		delete(r.pending, id)
+		r.pendingMu.Unlock()
+	}
 
+	r.writeMu.Lock()
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := r.conn.Write(wctx, websocket.MessageText, req); err != nil {
+	err = r.conn.Write(wctx, websocket.MessageText, req)
+	cancel()
+	r.writeMu.Unlock()
+	if err != nil {
+		drop()
 		return nil, err
 	}
 
-	// Читаем события, пока не придёт ответ с нашим id.
+	// Таймаут дублирует wctx: если страница зависла, call не вечен.
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	select {
+	case rep := <-ch:
+		return rep.result, rep.err
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	case <-timer.C:
+		drop()
+		return nil, fmt.Errorf("widgets: cdp %s: таймаут ответа", method)
+	case <-r.rctx.Done():
+		drop()
+		return nil, errors.New("widgets: соединение закрыто")
+	}
+}
+
+// readLoop — горутина-владелец conn.Read: ответы уходят в futures,
+// события Runtime.bindingCalled — в IPC-хук (в отдельной горутине:
+// хук сам делает call() и при синхронном вызове упёрся бы в себя).
+func (r *CDPRenderer) readLoop() {
+	// Ссылка на сокет захватывается один раз: Close() больше не пишет
+	// r.conn, а лишь закрывает соединение (Read вернёт ошибку).
+	conn := r.conn
 	for {
-		_, data, err := r.conn.Read(ctx)
+		_, data, err := conn.Read(r.rctx)
 		if err != nil {
-			return nil, err
+			r.failPending(err)
+			return
 		}
 		var msg struct {
-			ID    int64 `json:"id"`
-			Error *struct {
+			ID     int64  `json:"id"` // 0 — событие (id начинаются с 1)
+			Method string `json:"method"`
+			Error  *struct {
 				Message string `json:"message"`
 			} `json:"error"`
 			Result json.RawMessage `json:"result"`
+			Params struct {
+				Name    string `json:"name"`
+				Payload string `json:"payload"`
+			} `json:"params"`
 		}
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue // событие не-JSON — пропускаем
+		if json.Unmarshal(data, &msg) != nil {
+			continue // мусорный кадр — пропускаем
 		}
-		if msg.ID != id {
-			continue // событие — читаем дальше
+
+		if msg.ID != 0 { // ответ на запрос
+			r.pendingMu.Lock()
+			ch := r.pending[msg.ID]
+			delete(r.pending, msg.ID)
+			r.pendingMu.Unlock()
+			if ch != nil {
+				if msg.Error != nil {
+					ch <- cdpReply{err: fmt.Errorf("cdp: %s", msg.Error.Message)}
+				} else {
+					ch <- cdpReply{result: msg.Result}
+				}
+			}
+			continue
 		}
-		if msg.Error != nil {
-			return nil, fmt.Errorf("widgets: cdp %s: %s", method, msg.Error.Message)
+
+		// Событие: транспорт IPC — binding нашего имени; остальное шум.
+		if msg.Method == "Runtime.bindingCalled" && msg.Params.Name == bindingName {
+			if fn, ok := r.ipcHook.Load().(func(string)); ok {
+				go fn(msg.Params.Payload)
+			}
 		}
-		return msg.Result, nil
 	}
 }
+
+// failPending — сокет умер: все ждущие call() получают ошибку.
+func (r *CDPRenderer) failPending(err error) {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	for id, ch := range r.pending {
+		ch <- cdpReply{err: fmt.Errorf("widgets: соединение закрыто: %w", err)}
+		delete(r.pending, id)
+	}
+}
+
+// bindingName — имя binding'а в странице: window.lythrum(payload).
+// Объявлено отдельно: страница и композитор должны назвать его одинаково.
+const bindingName = "lythrum"
 
 // Load реализует WidgetRenderer: размер вьюпорта + навигация на URL.
 func (r *CDPRenderer) Load(ctx context.Context, rawURL string, w, h int) error {
@@ -253,6 +352,16 @@ func (r *CDPRenderer) Load(ctx context.Context, rawURL string, w, h int) error {
 		"height":            h,
 		"deviceScaleFactor": 1,
 		"mobile":            false,
+	}); err != nil {
+		return err
+	}
+	// Runtime: IPC-канал страницы. addBinding ДО навигации — binding
+	// живёт во всех контекстах и ждёт window.lythrum(...) сразу.
+	if _, err := r.call(ctx, "Runtime.enable", map[string]any{}); err != nil {
+		return err
+	}
+	if _, err := r.call(ctx, "Runtime.addBinding", map[string]any{
+		"name": bindingName,
 	}); err != nil {
 		return err
 	}
@@ -369,16 +478,46 @@ func (r *CDPRenderer) Frame(ctx context.Context) (image.Image, error) {
 	return png.Decode(bytes.NewReader(raw))
 }
 
-// Close реализует WidgetRenderer: процесс браузера завершается, профиль
-// удаляется. Утечки процессов недопустимы.
+// SetIPCHook — колбэк IPC-команд страницы: payload — JSON, который
+// страница передала в window.lythrum(...). Ставится Manager'ом сразу
+// после фабрики (до Load) и никогда не nil после этого.
+func (r *CDPRenderer) SetIPCHook(fn func(string)) {
+	r.ipcHook.Store(fn)
+}
+
+// DeliverResponse доставляет ответ композитора странице: CustomEvent
+// 'lythrum:resp' с detail-строкой (страница делает JSON.parse сама).
+// Fire-and-forget: страница могла уйти в навигацию — ошибка доставки
+// не падает и не роняет рендерер.
+func (r *CDPRenderer) DeliverResponse(payload string) {
+	raw, err := json.Marshal(payload) // безопасный JS-литерал строки
+	if err != nil {
+		return
+	}
+	expr := fmt.Sprintf("window.dispatchEvent(new CustomEvent('lythrum:resp',{detail:%s}))", raw)
+	go func() {
+		ctx, cancel := context.WithTimeout(r.rctx, 5*time.Second)
+		defer cancel()
+		_, _ = r.call(ctx, "Runtime.evaluate", map[string]any{
+			"expression":    expr,
+			"returnByValue": true,
+		})
+	}()
+}
+
+// Close реализует WidgetRenderer: отмена читателя, сокет, процесс
+// браузера, профиль. Утечки процессов недопустимы.
 func (r *CDPRenderer) Close() error {
+	if r.closed.Swap(true) {
+		return nil
+	}
+	r.rcancel() // читатель выйдет и по отмене контекста
 	if r.conn != nil {
-		r.conn.CloseNow()
-		r.conn = nil
+		r.conn.CloseNow() // читатель выйдет по ошибке чтения
 	}
 	if r.cmd.Process != nil {
 		r.cmd.Process.Kill()
 	}
-	r.cmd.Wait()
+	_ = r.cmd.Wait()
 	return os.RemoveAll(r.profile)
 }

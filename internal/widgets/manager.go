@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"context"
+	"encoding/json"
 	"image"
 	"log"
 	"sync"
@@ -27,6 +28,8 @@ type Manager struct {
 	mu       sync.RWMutex
 	procs    map[string]*proc
 	restarts int // метрика для Control Center
+
+	api *CompositorAPI // исполнители IPC-команд виджетов (см. rpc.go)
 }
 
 // proc — жизненный цикл одного рендерера.
@@ -70,6 +73,22 @@ func (m *Manager) Restarts() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.restarts
+}
+
+// SetAPI задаёт исполнителей IPC-команд виджетов (Notify, карточки,
+// буфер). Вызывается main'ом до Sync; хуки снимаются под mu — замену
+// API на ходу Supervisor подхватит при следующей жизни рендерера.
+func (m *Manager) SetAPI(api *CompositorAPI) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.api = api
+}
+
+// getAPI — снапшот API для горутин-надзирателей.
+func (m *Manager) getAPI() *CompositorAPI {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.api
 }
 
 // WidgetsCount — число активных процессов виджетов (метрика).
@@ -188,6 +207,28 @@ func (m *Manager) runOnce(p *proc) (err error) {
 		return err
 	}
 	p.setRenderer(r)
+
+	// IPC-шов (Спринт 7): CDP-рендерер умеет принимать binding-команды
+	// страницы — навешиваем шлюз «запрос → проверка → ответ» через
+	// type assertion: NullFactory/фейки шва просто не имеют.
+	if api := m.getAPI(); api != nil {
+		if hookable, ok := r.(interface{ SetIPCHook(func(string)) }); ok {
+			hookable.SetIPCHook(func(payload string) {
+				var req Request
+				if json.Unmarshal([]byte(payload), &req) != nil {
+					return // мусор от страницы — молча
+				}
+				resp := NewHandler(spec, api).Handle(req)
+				data, err := json.Marshal(resp)
+				if err != nil {
+					return
+				}
+				if d, ok := r.(interface{ DeliverResponse(string) }); ok {
+					d.DeliverResponse(string(data))
+				}
+			})
+		}
+	}
 
 	m.setStatus(p, StatusStarting)
 	if err := r.Load(p.ctx, spec.URL, int(spec.Rect.W), int(spec.Rect.H)); err != nil {

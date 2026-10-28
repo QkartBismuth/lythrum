@@ -157,6 +157,43 @@ func run() error {
 		widgetFactory = widgets.NullFactory
 	}
 	wm := widgets.NewManager(widgetFactory)
+
+	// ── IPC виджетов: исполнители команд (Спринт 7) ──
+	// Виджеты НЕ доверенные: до этих хуков запрос проходит Handler
+	// (токен → белый список → права). Хуки публикуют события шины —
+	// изменения состояния делает только main loop (владелец холста).
+	wm.SetAPI(&widgets.CompositorAPI{
+		Notify: func(widgetID, text string) {
+			log.Printf("widgets: notify[%s]: %s", widgetID, text)
+			bus.Publish(module.Event{Type: module.EvNotify, Str: text})
+		},
+		AddCard: func(widgetID, path string, at [2]float64) string {
+			bus.Publish(module.Event{
+				Type: module.EvDroppedFile, Str: path,
+				Vec: core.Vec2{X: at[0], Y: at[1]},
+			})
+			return path // ID карточки = путь (OpenCard так и создаёт)
+		},
+		MoveCard: func(widgetID, cardID string, to [2]float64) bool {
+			bus.Publish(module.Event{
+				Type: module.EvCardMove, Str: cardID,
+				Vec: core.Vec2{X: to[0], Y: to[1]},
+			})
+			return true
+		},
+		ReadFile: func(widgetID, path string) ([]byte, error) {
+			// Санитизация: только абсолютные пути. Для абсолюта
+			// filepath.Clean не может выпустить за корень («/..» = «/»),
+			// поэтому достаточно отсечь относительный мусор.
+			if !filepath.IsAbs(path) {
+				return nil, os.ErrInvalid
+			}
+			return os.ReadFile(filepath.Clean(path))
+		},
+		SetClip: func(widgetID, text string) {
+			bus.Publish(module.Event{Type: module.EvClipboardPush, Str: text})
+		},
+	})
 	sup.Go(wm)
 
 	// ── DND: перетаскивание файлов и данных ──

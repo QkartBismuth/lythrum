@@ -2,10 +2,13 @@ package widgets
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,4 +146,135 @@ func waitStatus(t *testing.T, m *Manager, id string, want Status, within time.Du
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("статус %q не достигнут за %v (сейчас %q)", want, within, m.StatusOf(id))
+}
+
+// Интеграция (Спринт 7): полный круг IPC-канала. Страница зовёт
+// window.lythrum(JSON) → binding доставляет запрос в хук → Handler
+// (токен → белый список) → DeliverResponse возвращает ответ событием
+// 'lythrum:resp' → страница кладёт его в title → тест читает title
+// обратно по CDP. Заодно гоняет конкурентные call() под -race.
+func TestCDPIPCBindingRoundTrip(t *testing.T) {
+	requireBrowser(t)
+
+	dir := t.TempDir()
+	w := New("about:blank", core.Rect{X: 0, Y: 0, W: 320, H: 200}, PermNotify)
+	page := writeHTML(t, dir, "ipc.html", fmt.Sprintf(
+		`<!doctype html><html><head><title>init</title></head><body>
+		 <script>
+		 window.addEventListener('lythrum:resp', e => { document.title = e.detail; });
+		 window.addEventListener('load', () => {
+		   window.lythrum(JSON.stringify({token: %q, cmd: 'ping'}));
+		 });
+		 </script></body></html>`, w.Token))
+
+	r, err := CDPFactory{}.Build(context.Background(), w)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer r.Close()
+
+	cdp := r.(*CDPRenderer)
+
+	// Хук — как у Manager.runOnce: запрос → шлюз → ответ странице.
+	cdp.SetIPCHook(func(payload string) {
+		var req Request
+		if json.Unmarshal([]byte(payload), &req) != nil {
+			return
+		}
+		resp := NewHandler(w, &CompositorAPI{}).Handle(req) // ping: исполнители не нужны
+		if data, err := json.Marshal(resp); err == nil {
+			cdp.DeliverResponse(string(data))
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := cdp.Load(ctx, page, 320, 200); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Ответ вернулся странице: title стал телом ответа.
+	var title string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := cdp.call(ctx, "Runtime.evaluate", map[string]any{
+			"expression":    "document.title",
+			"returnByValue": true,
+		})
+		if err == nil {
+			var out struct {
+				Result struct{ Value string }
+			}
+			if json.Unmarshal(res, &out) == nil && strings.HasPrefix(out.Result.Value, "{") {
+				title = out.Result.Value
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if title != `{"ok":true,"data":"pong"}` {
+		t.Fatalf("ответ не вернулся странице: title=%q, want pong-ответ", title)
+	}
+}
+
+// Интеграция: битый токен отклоняется на полном пути (страница шлёт
+// чужой токен — в title ложится отказ, а не исполнение).
+func TestCDPIPCBindingWrongToken(t *testing.T) {
+	requireBrowser(t)
+
+	dir := t.TempDir()
+	w := New("about:blank", core.Rect{X: 0, Y: 0, W: 320, H: 200}, PermNotify)
+	page := writeHTML(t, dir, "ipc.html",
+		`<!doctype html><html><head><title>init</title></head><body>
+		 <script>
+		 window.addEventListener('lythrum:resp', e => { document.title = e.detail; });
+		 window.addEventListener('load', () => {
+		   window.lythrum(JSON.stringify({token: 'чужой', cmd: 'ping'}));
+		 });
+		 </script></body></html>`)
+
+	r, err := CDPFactory{}.Build(context.Background(), w)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer r.Close()
+
+	cdp := r.(*CDPRenderer)
+	cdp.SetIPCHook(func(payload string) {
+		var req Request
+		if json.Unmarshal([]byte(payload), &req) != nil {
+			return
+		}
+		resp := NewHandler(w, &CompositorAPI{}).Handle(req)
+		if data, err := json.Marshal(resp); err == nil {
+			cdp.DeliverResponse(string(data))
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := cdp.Load(ctx, page, 320, 200); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := cdp.call(ctx, "Runtime.evaluate", map[string]any{
+			"expression":    "document.title",
+			"returnByValue": true,
+		})
+		if err == nil {
+			var out struct {
+				Result struct{ Value string }
+			}
+			if json.Unmarshal(res, &out) == nil && strings.HasPrefix(out.Result.Value, "{") {
+				if !strings.Contains(out.Result.Value, "токен отклонён") {
+					t.Fatalf("чужой токен прошёл: %q", out.Result.Value)
+				}
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("ответ об отказе не вернулся странице")
 }

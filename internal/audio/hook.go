@@ -29,7 +29,7 @@ func SoundHook(am *AudioManager) func(module.Event) {
 			am.Play(SoundClick)
 		case module.EvToggleSearch, module.EvOpenControlCenter:
 			am.Play(SoundNotify)
-		case module.EvDroppedFile:
+		case module.EvNotify, module.EvDroppedFile:
 			am.Play(SoundNotify) // «файл упал на холст»
 		case module.EvPowerOverlay:
 			am.Play(SoundDevice)

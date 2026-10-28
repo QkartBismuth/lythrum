@@ -352,7 +352,7 @@ HEX отсеян, громкость зажата 0–100). Пайплайн г�
 событие шины (`EvPaletteChanged`/`EvSnapThreshold`/`EvVolume`) → main loop
 → `palette.Apply` (fail-clean пакет) / состояние холста.
 
-### Спринт 6 — Финализация: кадр, оверлеи, сторож ✅ (текущий)
+### Спринт 6 — Финализация: кадр, оверлеи, сторож ✅
 Задачи: программная растеризация кадра (скриншоты, эталонный вывод),
 доведение системных действий до конца (закрытие окон, громкость, оверлеи),
 watchdog зависаний.
@@ -375,13 +375,31 @@ watchdog зависаний.
 их игнорирует. Значения CC меняются ТОЛЬКО событиями шины (панель —
 отображение, не владелец).
 
-### Отложено (за рамки 6 спринтов)
-- **text-input**: поиск (Meta+S) и диалог запуска (Meta+R) со строкой
-  ввода, выбор области снипа — нужен протокол text-input-v3 и pointer
-  захват; ядро логирует отложенные события.
-- **Транспорт IPC CDP → Handler**: модель `Request→Handler→CompositorAPI`
-  покрыта тестами; транспорт `Runtime.addBinding` в cdp.go появится
-  вместе с реальными HTML-виджетами.
+### Спринт 7 — Текстовый ввод и IPC виджетов ✅ (текущий)
+Задачи: печать символов с раскладками (поиск Meta+S, запуск Meta+R),
+транспорт IPC `Runtime.addBinding` — страницы виджетов получают живые
+команды к композитору.
+
+| # | Уровень | Тест-кейс | Ожидание |
+|---|---|---|---|
+| 7.1 | Unit | `TestCharTyping`, `TestCharLayouts`, `TestDigitsAndShifted` | «foot» = 4×EvChar; us → латиница, ru → ЙЦУКЕН (f→а, Shift → А), Shift+5 → «%», б/ю на запятой/точке; Meta+F/Ctrl+C — НЕ символы |
+| 7.2 | Integration | `TestRunDialogLaunch`, `TestSearchFocusesWindow` | Run: Enter → `Launch(cmd)` и диалог закрыт; Search: подстрока фильтрует живые окна, Enter → фокус + твин камеры |
+| 7.3 | Integration | `TestSearchCycleAndToggle`, `TestDialogEscAndIgnoreWithoutDialog` | пустой запрос = все окна, Up/Down — кольцо, повторный хоткей закрывает; Esc закрывает; без диалога ввод — no-op |
+| 7.4 | Unit | `TestBackspaceEvent`, `TestRunDialogFrame` (и кадровые) | Backspace — отдельное событие; диалог рисуется `PaintDialog` без паник |
+| 7.5 | Integration | `TestCDPIPCBindingRoundTrip`, `TestCDPIPCBindingWrongToken` | полный круг: `window.lythrum(JSON)` → binding → хук → Handler → `DeliverResponse` → title страницы; чужой токен → отказ, не исполнение |
+
+Контракт IPC-транспорта: у CDP-рендерера единственная горутина-читатель
+ВЛАДЕЕТ `conn.Read`; `call()` шлёт под `writeMu` и ждёт future по id
+(таймаут 10 с), события `Runtime.bindingCalled` уходят в IPC-хук в
+отдельной горутине (хук сам делает `call()` — синхронный вызов упёрся бы
+в читателя). Binding ставится ДО навигации — `window.lythrum(...)`
+доступен с первого кадра страницы; ответы — `Runtime.evaluate`
+`CustomEvent('lythrum:resp')`, fire-and-forget. Manager навешивает шлюз
+«запрос → Handler (токен/белый список/права) → ответ» через type
+assertion — NullFactory и фейки шва просто не имеют.
+
+### Отложено (за рамки 7 спринтов)
+- **Выбор области снипа** — нужен pointer-захват и резиновая рамка.
 - **Backlight**: EvBrightness ждёт backlight-протокол Wayland.
 - **Вывод**: wayland-бэкенд создаёт output'ы, но поверхностный вывод кадров
   (wl_surface + buffer) — следующий этап; headless-вывод = `Kernel.Frame()`.
